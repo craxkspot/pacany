@@ -35,7 +35,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Ultimate Panther Bot with Vision & Search is alive!")
+        self.wfile.write(b"Ultimate Panther Bot is alive!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -66,7 +66,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Проверяем, есть ли картинка в сообщении
     image_url = None
     if update.message.photo:
-        # Берем фото в самом высоком доступном разрешении
         photo_file = await update.message.photo[-1].get_file()
         image_url = photo_file.file_path
 
@@ -85,7 +84,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "иногда даже грубоватой или использовать жесткое словцо, если собеседник нарывается или общается в таком стиле. "
                     "Внимательно следи за стилем пользователя: если просят убрать смайлики — не пиши их вообще. "
                     "Ты умеешь смотреть картинки, которые тебе присылают, и комментировать их в своем стиле. "
-                    "У тебя есть доступ к поиску в интернете: если спрашивают актуальные факты, новости или погоду — используй его. "
                     "Не будь пресным роботом-подлизалой, веди себя как живой циничный участник чата."
                 )
             }
@@ -112,11 +110,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.message.reply_to_message 
         and update.message.reply_to_message.from_user.id == context.bot.id
     )
-    is_mentioned = "пантера" in lower_text or image_url is not None # Картинку всегда замечаем
+    is_mentioned = "пантера" in lower_text or image_url is not None
     should_random_speak = random.random() < 0.15
 
     if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not should_random_speak:
-        return  # Молчим в группах, если нас не трогали
+        return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
@@ -133,24 +131,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_text = None
     try:
-        # Запрос к Qwen с поддержкой поиска и картинок
+        # Убираем не поддерживаемый напрямую в tools браузерный поиск, оставляя чистый мультимодальный чат
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=temp_messages,
-            tools=[{"type": "browser_search"}],
-            tool_choice="auto",
             temperature=0.85,
         )
         reply_text = response.choices[0].message.content
         
         if reply_text:
-            # Сохраняем текстовый ответ в историю памяти
             chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
         else:
             reply_text = "Чего?"
 
     except Exception as e:
-        logger.error(f"Ошибка Groq API (Vision/Search): {e}")
+        logger.error(f"Ошибка Groq API: {e}")
         reply_text = "Сеть упала или глаза замылило. Повтори."
 
     try:
