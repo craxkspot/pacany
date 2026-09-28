@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# Клиент Groq для текстов и зрения
+# Клиент Groq для текстов, зрения и обработки промптов
 groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
@@ -52,6 +52,31 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
+
+
+async def enhance_image_prompt(user_prompt: str) -> str:
+    """Используем Groq, чтобы превратить короткий или сложный запрос в качественный промпт для генератора"""
+    try:
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты профессиональный промпт-инженер для нейросетей генерации изображений. "
+                        "Твоя задача — перевести запрос пользователя на английский язык, развернуть его, добавить деталей, стиля, освещения и качества, "
+                        "чтобы генерация получилась максимально точной и красивой. Выдай ТОЛЬКО готовый английский промпт без лишних слов."
+                    )
+                },
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=100,
+            temperature=0.7,
+        )
+        enhanced = response.choices[0].message.content.strip()
+        return enhanced if enhanced else user_prompt
+    except Exception:
+        return user_prompt
 
 
 async def generate_free_image(prompt: str) -> bytes | None:
@@ -116,7 +141,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not prompt_for_image:
             prompt_for_image = user_text
 
-        image_bytes = await generate_free_image(prompt_for_image)
+        # Улучшаем промпт через языковую модель перед отправкой
+        detailed_prompt = await enhance_image_prompt(prompt_for_image)
+        logger.info(f"Исходный промпт: {prompt_for_image} -> Улучшенный: {detailed_prompt}")
+
+        image_bytes = await generate_free_image(detailed_prompt)
         
         if image_bytes:
             photo_stream = io.BytesIO(image_bytes)
@@ -244,7 +273,7 @@ def main():
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    logger.info(f"Стабильная Пантера заведена. Модель: {GROQ_MODEL}")
+    logger.info(f"Пантера с умным промптингом запущена. Модель: {GROQ_MODEL}")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
