@@ -20,8 +20,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # Инициализация клиента Google GenAI
-# Если вы используете старую библиотеку (google-generativeai), этот код может отличаться.
-# Для современной официальной библиотеки используется genai.Client()
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
@@ -56,7 +54,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Отправляем запрос к Gemini
-        # Используем актуальную модель gemini-2.5-flash (или gemini-1.5-flash)
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=user_message,
@@ -66,11 +63,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply_text)
 
     except errors.APIError as e:
-        # Ошибка со стороны API Google (например, неверный ключ, квоты)
         logger.error(f"Ошибка Gemini API: {e}")
         await update.message.reply_text(f"Ошибка со стороны ИИ: {e}")
     except Exception as e:
-        # Любая другая непредвиденная ошибка (выведет полный стектрейс в логи Render)
         import traceback
         logger.error(f"Критическая ошибка:\n{traceback.format_exc()}")
         await update.message.reply_text(f"Ой, мои мыслительные процессы сломались! Ошибка: {e}")
@@ -92,7 +87,7 @@ def main():
     # Запуск Telegram бота
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-д    # Регистрируем обработчик текстовых сообщений
+    # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
     logger.info("Бот запущен и ожидает сообщения...")
