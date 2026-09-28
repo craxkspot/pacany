@@ -24,10 +24,9 @@ client = OpenAI(
     api_key=GROQ_API_KEY
 )
 
-# Используем модель с поддержкой Vision (картинок) и текста
 GROQ_MODEL = "qwen/qwen3.8-27b"
 
-# Память чатов (последние 15 сообщений)
+# Память чатов
 chat_histories = {}
 
 
@@ -35,7 +34,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Ultimate Panther Bot is alive!")
+        self.wfile.write(b"Panther Bot is alive!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -59,59 +58,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name or "Друг"
     chat_type = update.message.chat.type
 
-    # Извлекаем текст или подпись к картинке
     user_text = update.message.text or update.message.caption or ""
     lower_text = user_text.lower()
 
-    # Проверяем, есть ли картинка в сообщении
     image_url = None
     if update.message.photo:
         photo_file = await update.message.photo[-1].get_file()
         image_url = photo_file.file_path
 
-    # Если нет ни текста, ни картинки — пропускаем
     if not user_text and not image_url:
         return
 
-    # Инициализируем историю чата
+    # Настраиваем более адекватный и гибкий характер
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ты — Пантера, дерзкий, едкий и смышленый ИИ-компаньон в Telegram. "
-                    "У тебя есть свое мнение на всё. Ты можешь быть в меру саркастичной, острой на язык, "
-                    "иногда даже грубоватой или использовать жесткое словцо, если собеседник нарывается или общается в таком стиле. "
-                    "Внимательно следи за стилем пользователя: если просят убрать смайлики — не пиши их вообще. "
-                    "Ты умеешь смотреть картинки, которые тебе присылают, и комментировать их в своем стиле. "
-                    "Не будь пресным роботом-подлизалой, веди себя как живой циничный участник чата."
+                    "Ты — Пантера, крутой и сообразительный ИИ-компаньон в Telegram. "
+                    "Ты умеешь гибко подстраиваться под стиль собеседника: если с тобой общаются просто или дружелюбно — общайся так же. "
+                    "Если человек шутит или подкалывает — можешь ответить с легким здоровым сарказмом, но не будь излишне злой или грубой. "
+                    "Строго соблюдай правила стиля: если просят убрать смайлики — не пиши их совсем. "
+                    "Ты умеешь видеть картинки, которые присылают. Учти, что ты текстовый бот и не можешь сама рисовать картинки, "
+                    "поэтому если просят сгенерировать или изменить фото — вежливо объясни это или предложи детально описать сцену."
                 )
             }
         ]
 
-    # Формируем сообщение для модели (поддерживаем мультимодальность с картинкой)
     if image_url:
         user_content = [
-            {"type": "text", "text": f"{user_name} прислал(а) картинку с подписью: '{user_text}'" if user_text else f"{user_name} прислал(а) картинку без текста. Оцени её."},
+            {"type": "text", "text": f"{user_name} прислал(а) картинку с подписью: '{user_text}'" if user_text else f"{user_name} прислал(а) картинку. Оцени."},
             {"type": "image_url", "image_url": {"url": image_url}}
         ]
     else:
         user_content = f"{user_name}: {user_text}"
 
-    # Добавляем сообщение в общую память чата
     chat_histories[chat_id].append({"role": "user", "content": user_content})
     
-    # Ограничиваем историю
-    if len(chat_histories[chat_id]) > 16:
-        chat_histories[chat_id] = [chat_histories[chat_id][0]] + chat_histories[chat_id][-15:]
+    if len(chat_histories[chat_id]) > 12:
+        chat_histories[chat_id] = [chat_histories[chat_id][0]] + chat_histories[chat_id][-11:]
 
-    # Логика для групповых чатов
     is_reply_to_bot = (
         update.message.reply_to_message 
         and update.message.reply_to_message.from_user.id == context.bot.id
     )
     is_mentioned = "пантера" in lower_text or image_url is not None
-    should_random_speak = random.random() < 0.15
+    should_random_speak = random.random() < 0.12  # Чуть реже рандомные вбросы
 
     if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not should_random_speak:
         return
@@ -121,9 +113,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_direct_appeal = (chat_type == "private") or is_reply_to_bot or is_mentioned or (image_url is not None)
 
     prompt_mode_instruction = (
-        " Инструкция для этого ответа: НАПИШИ ОБЫЧНОЕ СООБЩЕНИЕ В ЧАТ (не отвечай никому конкретно, просто вставь свои три копейки на основе общей беседы)."
+        " Инструкция: Напиши короткую реплику в чат, ни к кому не обращаясь."
         if not is_direct_appeal 
-        else " Инструкция для этого ответа: Ответь конкретно автору последнего сообщения или прокомментируй его картинку."
+        else " Инструкция: Ответь емко автору сообщения или прокомментируй картинку."
     )
 
     temp_messages = chat_histories[chat_id].copy()
@@ -131,22 +123,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_text = None
     try:
-        # Убираем не поддерживаемый напрямую в tools браузерный поиск, оставляя чистый мультимодальный чат
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=temp_messages,
-            temperature=0.85,
+            max_tokens=600,
+            temperature=0.75,
         )
         reply_text = response.choices[0].message.content
         
         if reply_text:
             chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
         else:
-            reply_text = "Чего?"
+            reply_text = "На связи."
 
     except Exception as e:
         logger.error(f"Ошибка Groq API: {e}")
-        reply_text = "Сеть упала или глаза замылило. Повтори."
+        reply_text = "Сеть моргнула, повтори."
 
     try:
         if is_direct_appeal:
@@ -168,7 +160,7 @@ def main():
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    logger.info(f"Ультимативная Пантера запущена. Модель: {GROQ_MODEL}")
+    logger.info(f"Сбалансированная Пантера запущена. Модель: {GROQ_MODEL}")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
