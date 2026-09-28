@@ -1,11 +1,13 @@
 import os
 import io
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from google import genai
 from google.genai import types
 
-# Получаем ключи из переменных окружения (Render передает их автоматически)
+# Получаем ключи из переменных окружения
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
@@ -22,8 +24,21 @@ SYSTEM_INSTRUCTION = (
     "Старайся общаться естественно, с легким юмором, поддерживай атмосферу живого общения."
 )
 
-# Хранилище истории чатов в памяти
 chat_sessions = {}
+
+# --- ЗАГЛУШКА ВЕБ-СЕРВЕРА ДЛЯ RENDER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Panther Bot is alive and running!")
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"Веб-сервер запущен на порту {port} для поддержания активности на Render...")
+    server.serve_forever()
+# ---------------------------------------
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -34,12 +49,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.caption or update.message.text or ""
     lower_text = user_text.lower()
 
-    # Определяем, личный ли это чат или группа
     is_private = update.message.chat.type == "private"
-
-    # Проверяем, обращаются ли к боту:
-    # 1. Если это личные сообщения — отвечаем всегда.
-    # 2. Если это группа — проверяем, есть ли слово "пантера" в тексте или бот получил картинку/ответ на свое сообщение.
     mentioned = "пантера" in lower_text
     is_reply_to_bot = (
         update.message.reply_to_message 
@@ -47,10 +57,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if not is_private and not mentioned and not is_reply_to_bot and not update.message.photo:
-        # В группе, если нас не звали и не кидали картинку — просто пропускаем сообщение
         return
 
-    # Инициализация сессии для чата, если её еще нет
     if chat_id not in chat_sessions:
         chat_sessions[chat_id] = ai_client.chats.create(
             model=MODEL_ID,
@@ -62,10 +70,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = chat_sessions[chat_id]
 
     try:
-        # Обработка картинок, если пользователь прикрепил фото
         if update.message.photo:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-            
             photo_file = await update.message.photo[-1].get_file()
             photo_bytes = await photo_file.download_as_bytearray()
             
@@ -84,11 +90,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(response.text)
             return
 
-        # Проверка, не просят ли нарисовать картинку (например: "Пантера, нарисуй...")
         if any(keyword in lower_text for keyword in ["нарисуй", "сгенерируй картинку", "создай изображение"]):
             await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
             
-            # Генерируем картинку через Imagen
             result = ai_client.models.generate_images(
                 model=IMAGE_MODEL_ID,
                 prompt=user_text,
@@ -106,7 +110,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_photo(photo=bio, caption=f"Лови картинку по твоему заказу, {user_name}! 🐾")
             return
 
-        # Обычный текстовый диалог
         if user_text:
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
             formatted_prompt = f"{user_name}: {user_text}"
@@ -122,13 +125,16 @@ def main():
         print("Ошибка: Не заданы переменные окружения TELEGRAM_TOKEN или GEMINI_API_KEY!")
         return
 
+    # Запускаем мини-веб-сервер в отдельном потоке, чтобы Render был доволен открытым портом
+    server_thread = threading.Thread(target=run_web_server, daemon=True)
+    server_thread.start()
+
+    # Запуск самого Telegram-бота
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
-    # Слушаем все текстовые и фото-сообщения
     app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & (~filters.COMMAND), handle_message))
 
-    print("Бот 'Пантера' запущен и готов к охоте...")
+    print("Бот 'Пантера' запущен в режиме Web Service...")
     app.run_polling()
 
-if __name__ ==- "__main__":
+if __name__ == "__main__":
     main()
