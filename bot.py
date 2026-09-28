@@ -24,35 +24,18 @@ client = OpenAI(
     api_key=GROQ_API_KEY
 )
 
-# Функция выбора надежной текстовой модели из твоего списка
-def get_active_groq_model():
-    try:
-        models = client.models.list()
-        available = [m.id for m in models.data]
-        logger.info(f"Доступные модели: {available}")
-        
-        # Приоритет актуальным текстовым моделям из твоего списка
-        for preferred in ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]:
-            if preferred in available:
-                logger.info(f"Выбрана приоритетная текстовая модель: {preferred}")
-                return preferred
-                
-        # Если вдруг их нет, ищем любую, в названии которой нет whisper/guard
-        for m_id in available:
-            if "whisper" not in m_id and "guard" not in m_id and "orpheus" not in m_id:
-                logger.info(f"Выбрана альтернативная модель: {m_id}")
-                return m_id
-    except Exception as e:
-        logger.error(f"Не удалось получить список моделей: {e}")
-    
-    return "openai/gpt-oss-20b"
+# Используем модель с поддержкой Vision (картинок) и текста
+GROQ_MODEL = "qwen/qwen3.8-27b"
+
+# Память чатов (последние 15 сообщений)
+chat_histories = {}
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Panther Bot with Groq is alive and running!")
+        self.wfile.write(b"Ultimate Panther Bot with Vision & Search is alive!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -72,46 +55,114 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
-    user_message = update.message.caption or update.message.text or ""
+    chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name or "Друг"
-    user_username = update.effective_user.username or "без username"
     chat_type = update.message.chat.type
-    lower_text = user_message.lower()
 
-    if chat_type != "private":
-        is_mentioned = "пантера" in lower_text
-        is_reply_to_bot = (
-            update.message.reply_to_message 
-            and update.message.reply_to_message.from_user.id == context.bot.id
-        )
-        should_random_reply = random.random() < 0.25
+    # Извлекаем текст или подпись к картинке
+    user_text = update.message.text or update.message.caption or ""
+    lower_text = user_text.lower()
 
-        if not is_mentioned and not is_reply_to_bot and not should_random_reply:
-            return
+    # Проверяем, есть ли картинка в сообщении
+    image_url = None
+    if update.message.photo:
+        # Берем фото в самом высоком доступном разрешении
+        photo_file = await update.message.photo[-1].get_file()
+        image_url = photo_file.file_path
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    # Если нет ни текста, ни картинки — пропускаем
+    if not user_text and not image_url:
+        return
 
-    active_model = get_active_groq_model()
+    # Инициализируем историю чата
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = [
+            {
+                "role": "system", 
+                "content": (
+                    "Ты — Пантера, дерзкий, едкий и смышленый ИИ-компаньон в Telegram. "
+                    "У тебя есть свое мнение на всё. Ты можешь быть в меру саркастичной, острой на язык, "
+                    "иногда даже грубоватой или использовать жесткое словцо, если собеседник нарывается или общается в таком стиле. "
+                    "Внимательно следи за стилем пользователя: если просят убрать смайлики — не пиши их вообще. "
+                    "Ты умеешь смотреть картинки, которые тебе присылают, и комментировать их в своем стиле. "
+                    "У тебя есть доступ к поиску в интернете: если спрашивают актуальные факты, новости или погоду — используй его. "
+                    "Не будь пресным роботом-подлизалой, веди себя как живой циничный участник чата."
+                )
+            }
+        ]
+
+    # Формируем сообщение для модели (поддерживаем мультимодальность с картинкой)
+    if image_url:
+        user_content = [
+            {"type": "text", "text": f"{user_name} прислал(а) картинку с подписью: '{user_text}'" if user_text else f"{user_name} прислал(а) картинку без текста. Оцени её."},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
+    else:
+        user_content = f"{user_name}: {user_text}"
+
+    # Добавляем сообщение в общую память чата
+    chat_histories[chat_id].append({"role": "user", "content": user_content})
+    
+    # Ограничиваем историю
+    if len(chat_histories[chat_id]) > 16:
+        chat_histories[chat_id] = [chat_histories[chat_id][0]] + chat_histories[chat_id][-15:]
+
+    # Логика для групповых чатов
+    is_reply_to_bot = (
+        update.message.reply_to_message 
+        and update.message.reply_to_message.from_user.id == context.bot.id
+    )
+    is_mentioned = "пантера" in lower_text or image_url is not None # Картинку всегда замечаем
+    should_random_speak = random.random() < 0.15
+
+    if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not should_random_speak:
+        return  # Молчим в группах, если нас не трогали
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    is_direct_appeal = (chat_type == "private") or is_reply_to_bot or is_mentioned or (image_url is not None)
+
+    prompt_mode_instruction = (
+        " Инструкция для этого ответа: НАПИШИ ОБЫЧНОЕ СООБЩЕНИЕ В ЧАТ (не отвечай никому конкретно, просто вставь свои три копейки на основе общей беседы)."
+        if not is_direct_appeal 
+        else " Инструкция для этого ответа: Ответь конкретно автору последнего сообщения или прокомментируй его картинку."
+    )
+
+    temp_messages = chat_histories[chat_id].copy()
+    temp_messages.append({"role": "system", "content": prompt_mode_instruction})
 
     reply_text = None
     try:
+        # Запрос к Qwen с поддержкой поиска и картинок
         response = client.chat.completions.create(
-            model=active_model,
-            messages=[
-                {"role": "system", "content": "Ты — Пантера, крутой ИИ-компаньон в Telegram. Отвечай емко, интересно, с характером."},
-                {"role": "user", "content": f"Пользователь {user_name} (@{user_username}) пишет: '{user_message}'"}
-            ],
-            temperature=0.7,
+            model=GROQ_MODEL,
+            messages=temp_messages,
+            tools=[{"type": "browser_search"}],
+            tool_choice="auto",
+            temperature=0.85,
         )
         reply_text = response.choices[0].message.content
+        
+        if reply_text:
+            # Сохраняем текстовый ответ в историю памяти
+            chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
+        else:
+            reply_text = "Чего?"
+
     except Exception as e:
-        logger.error(f"Ошибка Groq API: {e}")
-        reply_text = "Хм, что-то у меня в мыслях закоротило. Попробуй написать еще раз! 🐾"
+        logger.error(f"Ошибка Groq API (Vision/Search): {e}")
+        reply_text = "Сеть упала или глаза замылило. Повтори."
 
     try:
-        await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
+        if is_direct_appeal:
+            await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=reply_text, parse_mode=ParseMode.MARKDOWN)
     except Exception:
-        await update.message.reply_text(reply_text)
+        if is_direct_appeal:
+            await update.message.reply_text(reply_text)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=reply_text)
 
 
 def main():
@@ -122,8 +173,7 @@ def main():
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    chosen_model = get_active_groq_model()
-    logger.info(f"Бот запущен. Финальная модель: {chosen_model}")
+    logger.info(f"Ультимативная Пантера запущена. Модель: {GROQ_MODEL}")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
