@@ -27,7 +27,7 @@ client = OpenAI(
 )
 
 # Используем супер-быструю модель Llama 3 от Groq
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = "llama3-8b-8192"
 
 
 # 1. Веб-сервер для Health-check (чтобы Render не усыплял бота)
