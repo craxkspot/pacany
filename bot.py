@@ -24,23 +24,28 @@ client = OpenAI(
     api_key=GROQ_API_KEY
 )
 
-# Функция для вывода доступных моделей в лог Render и выбора первой рабочей
+# Функция выбора надежной текстовой модели из твоего списка
 def get_active_groq_model():
     try:
         models = client.models.list()
-        logger.info("=== ДОСТУПНЫЕ МОДЕЛИ НА ТВОЕМ КЛЮЧЕ ===")
-        model_list = []
-        for m in models.data:
-            logger.info(f"Доступна модель: {m.id}")
-            model_list.append(m.id)
-        logger.info("========================================")
+        available = [m.id for m in models.data]
+        logger.info(f"Доступные модели: {available}")
         
-        if model_list:
-            return model_list[0] # Возвращает самую первую доступную модель
+        # Приоритет актуальным текстовым моделям из твоего списка
+        for preferred in ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]:
+            if preferred in available:
+                logger.info(f"Выбрана приоритетная текстовая модель: {preferred}")
+                return preferred
+                
+        # Если вдруг их нет, ищем любую, в названии которой нет whisper/guard
+        for m_id in available:
+            if "whisper" not in m_id and "guard" not in m_id and "orpheus" not in m_id:
+                logger.info(f"Выбрана альтернативная модель: {m_id}")
+                return m_id
     except Exception as e:
         logger.error(f"Не удалось получить список моделей: {e}")
     
-    return "gpt-oss-20b"
+    return "openai/gpt-oss-20b"
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -118,7 +123,7 @@ def main():
     server_thread.start()
 
     chosen_model = get_active_groq_model()
-    logger.info(f"Бот запущен. Выбрана модель: {chosen_model}")
+    logger.info(f"Бот запущен. Финальная модель: {chosen_model}")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
