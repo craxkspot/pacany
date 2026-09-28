@@ -2,12 +2,16 @@ import os
 import random
 import asyncio
 import logging
+import io
+import urllib.parse
+import httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from openai import OpenAI
+from duckduckgo_search import DDGS
 
 # Настройка логирования
 logging.basicConfig(
@@ -19,14 +23,14 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-client = OpenAI(
+# Клиент Groq для текстов и зрения
+groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 )
 
 GROQ_MODEL = "qwen/qwen3.8-27b"
 
-# Память чатов
 chat_histories = {}
 
 
@@ -34,7 +38,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Panther Bot is alive!")
+        self.wfile.write(b"Ultimate Panther Bot is alive!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -48,6 +52,37 @@ def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
+
+
+async def generate_free_image(prompt: str) -> bytes | None:
+    """Генерирует картинку бесплатно через Pollinations AI"""
+    encoded_prompt = urllib.parse.quote(prompt)
+    seed = random.randint(1, 1000000)
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+    
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        try:
+            response = await client.get(image_url)
+            if response.status_code == 200:
+                return response.content
+            else:
+                logger.error(f"Ошибка генератора картинок: {response.status_code}")
+                return None
+        except Exception as e:
+            logger.error(f"Исключение при запросе картинки: {e}")
+            return None
+
+
+def search_web(query: str) -> str:
+    """Ищет информацию в интернете через DuckDuckGo"""
+    try:
+        with DDGS() as ddgs:
+            results = [r.get('body', '') for r in ddgs.text(query, max_results=3)]
+            if results:
+                return "\n".join(results)
+    except Exception as e:
+        logger.error(f"Ошибка поиска: {e}")
+    return "Ничего свежего в сети не нашлось."
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -69,18 +104,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text and not image_url:
         return
 
-    # Настраиваем более адекватный и гибкий характер
+    # 1. Проверяем, просит ли пользователь нарисовать что-то конкретное
+    is_image_request = any(kw in lower_text for kw in ["нарисуй", "сделай картинку", "сгенерируй", "создай изображение"])
+
+    if is_image_request:
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+        
+        prompt_for_image = user_text
+        for kw in ["нарисуй", "сделай картинку", "сгенерируй", "создай изображение"]:
+            prompt_for_image = prompt_for_image.replace(kw, "").strip()
+        if not prompt_for_image:
+            prompt_for_image = user_text
+
+        image_bytes = await generate_free_image(prompt_for_image)
+        
+        if image_bytes:
+            photo_stream = io.BytesIO(image_bytes)
+            photo_stream.name = "generated_image.jpg"
+            await update.message.reply_photo(photo=photo_stream, caption="Держи.")
+            return
+        else:
+            await update.message.reply_text("Генератор картинок приболел, попробуй еще раз через секунду.")
+            return
+
+    # 2. Инициализация памяти чата
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ты — Пантера, крутой и сообразительный ИИ-компаньон в Telegram. "
-                    "Ты умеешь гибко подстраиваться под стиль собеседника: если с тобой общаются просто или дружелюбно — общайся так же. "
-                    "Если человек шутит или подкалывает — можешь ответить с легким здоровым сарказмом, но не будь излишне злой или грубой. "
-                    "Строго соблюдай правила стиля: если просят убрать смайлики — не пиши их совсем. "
-                    "Ты умеешь видеть картинки, которые присылают. Учти, что ты текстовый бот и не можешь сама рисовать картинки, "
-                    "поэтому если просят сгенерировать или изменить фото — вежливо объясни это или предложи детально описать сцену."
+                    "Ты — Пантера, крутой, гибкий и смышленый ИИ-компаньон в Telegram. "
+                    "Ты умеешь подстраиваться под стиль собеседника, общаешься непринужденно, с легким юмором или сарказмом, но без лишней злости. "
+                    "Если просят убрать смайлики — не пиши их совсем. "
+                    "У тебя есть доступ к интернету через поиск, поэтому если спрашивают свежие новости, треки или актуальную инфу — ты можешь её использовать. "
+                    "Ты умеешь смотреть присланные картинки и оценивать их."
                 )
             }
         ]
@@ -103,19 +160,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and update.message.reply_to_message.from_user.id == context.bot.id
     )
     is_mentioned = "пантера" in lower_text or image_url is not None
-    should_random_speak = random.random() < 0.12  # Чуть реже рандомные вбросы
+    
+    # 3. Рандомный вброс: текст или рандомная картинка ради прикола
+    should_random_speak = random.random() < 0.12
+    should_random_image = random.random() < 0.03  # 3% шанс выдать картинку-сюрприз
 
     if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not should_random_speak:
         return
 
+    # Рандомная генерация картинки ради прикола в группе
+    if should_random_image and chat_type != "private":
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+        fun_prompts = [
+            "cinematic dramatic scene, intense atmosphere, moody lighting",
+            "cyberpunk panther sitting in a neon-lit alley, highly detailed",
+            "epic movie still, cinematic tension, dramatic atmosphere"
+        ]
+        image_bytes = await generate_free_image(random.choice(fun_prompts))
+        if image_bytes:
+            photo_stream = io.BytesIO(image_bytes)
+            photo_stream.name = "surprise.jpg"
+            await context.bot.send_message(chat_id=chat_id, text="Вкину картинку просто ради прикола.")
+            await context.bot.send_photo(chat_id=chat_id, photo=photo_stream)
+            return
+
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+    # Если вопрос выглядит так, будто требует свежей инфы из интернета — делаем поиск
+    search_keywords = ["кто такой", "что за", "трек", "песня", "новости", "последни", "свеж", "когда вышел", "почему", "что случилось"]
+    if any(kw in lower_text for kw in search_keywords) and len(user_text) > 4:
+        search_result = search_web(user_text)
+        if search_result:
+            chat_histories[chat_id].append({
+                "role": "system", 
+                "content": f"Результаты поиска в интернете по запросу пользователя:\n{search_result}"
+            })
 
     is_direct_appeal = (chat_type == "private") or is_reply_to_bot or is_mentioned or (image_url is not None)
 
     prompt_mode_instruction = (
         " Инструкция: Напиши короткую реплику в чат, ни к кому не обращаясь."
         if not is_direct_appeal 
-        else " Инструкция: Ответь емко автору сообщения или прокомментируй картинку."
+        else " Инструкция: Ответь емко автору сообщения или прокомментируй картинку/информацию."
     )
 
     temp_messages = chat_histories[chat_id].copy()
@@ -123,7 +209,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_text = None
     try:
-        response = client.chat.completions.create(
+        response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=temp_messages,
             max_tokens=600,
@@ -160,7 +246,7 @@ def main():
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    logger.info(f"Сбалансированная Пантера запущена. Модель: {GROQ_MODEL}")
+    logger.info(f"Прокачанная Пантера запущена. Модель: {GROQ_MODEL}")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
