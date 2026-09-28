@@ -3,7 +3,8 @@ import asyncio
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode  # Исправленный импорт ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from google import genai
 from google.genai import errors
@@ -78,10 +79,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_text = "Серверы Google сейчас перегружены. Попробуй написать еще раз через пару секунд!"
 
     try:
-        # Пытаемся отправить с Markdown-разметкой, чтобы звёздочки превращались в жирный текст
+        # Отправляем сообщение с поддержкой Markdown
         await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
     except Exception:
-        # Если модель сгенерировала «сломанный» Markdown (незакрытые символы), отправляем без разметки, чтобы не было ошибки
+        # Если разметка сломана, отправляем обычным текстом
         await update.message.reply_text(reply_text)
 
 
