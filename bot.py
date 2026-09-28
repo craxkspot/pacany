@@ -1,13 +1,13 @@
 import os
+import random
 import asyncio
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from telegram import Update
-from telegram.constants import ParseMode  # Исправленный импорт ParseMode
+from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from google import genai
-from google.genai import errors
 
 # Настройка логирования
 logging.basicConfig(
@@ -16,15 +16,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Получаем ключи из переменных окружения Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Инициализация клиента Google GenAI
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
-# 1. Веб-сервер для Health-check (чтобы Render не усыплял бота)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -46,66 +43,79 @@ def run_web_server():
     server.serve_forever()
 
 
-# 2. Функция обработки сообщений от пользователей
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
     user_message = update.message.text
-    user_name = update.effective_user.first_name
-    logger.info(f"Получено сообщение от {user_name}: {user_message}")
+    user_name = update.effective_user.first_name or "Друг"
+    user_username = update.effective_user.username or "без username"
+    user_id = update.effective_user.id
+    chat_type = update.message.chat.type
+    lower_text = user_message.lower()
+
+    logger.info(f"Сообщение в [{chat_type}] от @{user_username} (ID: {user_id}, Имя: {user_name}): {user_message}")
+
+    # Логика для групповых чатов (чтобы не отвечать на абсолютно каждое сообщение)
+    if chat_type != "private":
+        is_mentioned = "пантера" in lower_text
+        is_reply_to_bot = (
+            update.message.reply_to_message 
+            and update.message.reply_to_message.from_user.id == context.bot.id
+        )
+        
+        # Если не назвали по имени и не ответили на ее сообщение — 
+        # даем шанс случайного вмешательства (например, в 25% случаев поддержать беседу/пошутить)
+        should_random_reply = random.random() < 0.25
+
+        if not is_mentioned and not is_reply_to_bot and not should_random_reply:
+            return
+
+    # Сообщаем пользователю, что Пантера печатает
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     reply_text = None
+    max_retries = 3
+    retry_delay = 3
 
-    # Попытка №1: через основную модель gemini-3.8-flash
-    try:
-        response = client.models.generate_content(
-            model='gemini-3.8-flash',
-            contents=user_message,
-        )
-        reply_text = response.text
-    except Exception as e:
-        logger.warning(f"Основная модель недоступна, пробуем запасную. Ошибка: {e}")
-        
-        # Попытка №2: запасной вариант gemini-1.5-flash
+    # Интеллектуальный запрос с авто-повтором при перегрузках
+    for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=user_message,
+                model='gemini-3.8-flash',
+                contents=(
+                    f"Ты — Пантера, остроумный и живой участник чата. "
+                    f"Пользователь {user_name} (@{user_username}) пишет: '{user_message}'. "
+                    f"Поддержи разговор, ответь на вопрос или пошути в своем стиле."
+                ),
             )
             reply_text = response.text
-        except Exception as e2:
-            logger.error(f"Обе модели недоступны:\n{e2}")
-            reply_text = "Серверы Google сейчас перегружены. Попробуй написать еще раз через пару секунд!"
+            break
+        except Exception as e:
+            logger.warning(f"Попытка {attempt + 1} неудачна. Ошибка: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+            else:
+                reply_text = "Серверы Google сейчас сильно перегружены, я чуть позже вернусь к этой теме! 🐾"
 
     try:
-        # Отправляем сообщение с поддержкой Markdown
         await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
     except Exception:
-        # Если разметка сломана, отправляем обычным текстом
         await update.message.reply_text(reply_text)
 
 
-# 3. Главная функция запуска бота
 def main():
-    if not TELEGRAM_TOKEN:
-        logger.error("Не задан TELEGRAM_TOKEN в переменных окружения!")
-        return
-    if not GEMINI_API_KEY:
-        logger.error("Не задан GEMINI_API_KEY в переменных окружения!")
+    if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
+        logger.error("Не заданы TELEGRAM_TOKEN или GEMINI_API_KEY!")
         return
 
-    # Запускаем веб-сервер в отдельном потоке
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    # Запуск Telegram бота
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-    logger.info("Бот запущен и ожидает сообщения...")
+    logger.info("Бот 'Пантера' запущен и участвует в жизни чата...")
     application.run_polling()
 
 
