@@ -24,18 +24,8 @@ client = OpenAI(
     api_key=GROQ_API_KEY
 )
 
-# Функция динамического выбора модели: берет первую доступную для твоего ключа
-def get_active_groq_model():
-    try:
-        models = client.models.list()
-        if models.data:
-            first_model = models.data[0].id
-            logger.info(f"Беру первую доступную модель из API: {first_model}")
-            return first_model
-    except Exception as e:
-        logger.error(f"Не удалось получить список моделей: {e}")
-    
-    return "llama-3.1-8b-instant"
+# Актуальная модель из твоей панели Groq
+GROQ_MODEL = "gpt-oss-20b"
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -81,12 +71,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-    active_model = get_active_groq_model()
-
     reply_text = None
     try:
         response = client.chat.completions.create(
-            model=active_model,
+            model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": "Ты — Пантера, крутой ИИ-компаньон в Telegram. Отвечай емко, интересно, с характером."},
                 {"role": "user", "content": f"Пользователь {user_name} (@{user_username}) пишет: '{user_message}'"}
@@ -113,8 +101,7 @@ def main():
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    chosen_model = get_active_groq_model()
-    logger.info(f"Бот запущен. Используется модель: {chosen_model}")
+    logger.info(f"Бот запущен. Используется модель: {GROQ_MODEL}")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
