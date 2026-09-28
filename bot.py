@@ -24,25 +24,17 @@ client = OpenAI(
     api_key=GROQ_API_KEY
 )
 
-# Функция для автоматического поиска именно чатовой модели Groq
+# Функция динамического выбора модели: берет первую доступную для твоего ключа
 def get_active_groq_model():
     try:
         models = client.models.list()
-        # Ищем полноценные модели Llama, исключая защитные фильтры (guard, prompt)
-        for m in models.data:
-            model_id = m.id
-            if "llama" in model_id and "guard" not in model_id and "prompt" not in model_id:
-                logger.info(f"Найдена рабочая чатовая модель Groq: {model_id}")
-                return model_id
-        
-        # Запасной вариант по другим семействам
-        for m in models.data:
-            if "mixtral" in m.id or "gemma" in m.id:
-                return m.id
+        if models.data:
+            first_model = models.data[0].id
+            logger.info(f"Беру первую доступную модель из API: {first_model}")
+            return first_model
     except Exception as e:
         logger.error(f"Не удалось получить список моделей: {e}")
     
-    # Жесткий резерв на крайний случай
     return "llama-3.1-8b-instant"
 
 
@@ -117,7 +109,7 @@ def main():
         logger.error("Не заданы TELEGRAM_TOKEN или GROQ_API_KEY!")
         return
 
-    # Запускаем веб-сервер для Render
+    # Запускаем веб-сервер для Render в отдельном потоке
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
