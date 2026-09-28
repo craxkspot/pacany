@@ -24,8 +24,23 @@ client = OpenAI(
     api_key=GROQ_API_KEY
 )
 
-# Актуальная модель из твоей панели Groq
-GROQ_MODEL = "gpt-oss-20b"
+# Функция для вывода доступных моделей в лог Render и выбора первой рабочей
+def get_active_groq_model():
+    try:
+        models = client.models.list()
+        logger.info("=== ДОСТУПНЫЕ МОДЕЛИ НА ТВОЕМ КЛЮЧЕ ===")
+        model_list = []
+        for m in models.data:
+            logger.info(f"Доступна модель: {m.id}")
+            model_list.append(m.id)
+        logger.info("========================================")
+        
+        if model_list:
+            return model_list[0] # Возвращает самую первую доступную модель
+    except Exception as e:
+        logger.error(f"Не удалось получить список моделей: {e}")
+    
+    return "gpt-oss-20b"
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -71,10 +86,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
+    active_model = get_active_groq_model()
+
     reply_text = None
     try:
         response = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=active_model,
             messages=[
                 {"role": "system", "content": "Ты — Пантера, крутой ИИ-компаньон в Telegram. Отвечай емко, интересно, с характером."},
                 {"role": "user", "content": f"Пользователь {user_name} (@{user_username}) пишет: '{user_message}'"}
@@ -97,11 +114,11 @@ def main():
         logger.error("Не заданы TELEGRAM_TOKEN или GROQ_API_KEY!")
         return
 
-    # Запускаем веб-сервер для Render в отдельном потоке
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    logger.info(f"Бот запущен. Используется модель: {GROQ_MODEL}")
+    chosen_model = get_active_groq_model()
+    logger.info(f"Бот запущен. Выбрана модель: {chosen_model}")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
