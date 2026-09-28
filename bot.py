@@ -53,9 +53,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Получено сообщение от {user_name}: {user_message}")
 
     try:
-        # Отправляем запрос к Gemini
+        # Используем актуальную модель, которую порекомендовало API
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.8-flash',
             contents=user_message,
         )
         
