@@ -3,7 +3,6 @@ import random
 import asyncio
 import logging
 import io
-import urllib.parse
 import httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
@@ -22,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+HUGGINGFACE_API_KEY = os.environ.get("HUGGINGFACE_API_KEY") # Твой ключ Hugging Face
 
 # Клиент Groq для текстов и зрения
 groq_client = OpenAI(
@@ -31,6 +31,10 @@ groq_client = OpenAI(
 
 GROQ_MODEL = "qwen/qwen3.8-27b"
 
+# Используем модель Stable Diffusion XL через Hugging Face Inference API
+HF_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_IMAGE_MODEL}"
+
 chat_histories = {}
 
 
@@ -38,7 +42,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Ultimate Panther Bot is alive!")
+        self.wfile.write(b"Ultimate Panther Bot with HF Images is alive!")
 
     def do_HEAD(self):
         self.send_response(200)
@@ -54,22 +58,31 @@ def run_web_server():
     server.serve_forever()
 
 
-async def generate_free_image(prompt: str) -> bytes | None:
-    """Генерирует картинку бесплатно через Pollinations AI"""
-    encoded_prompt = urllib.parse.quote(prompt)
-    seed = random.randint(1, 1000000)
-    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+async def generate_hf_image(prompt: str) -> bytes | None:
+    """Генерирует картинку через Hugging Face с твоим API-ключом"""
+    if not HUGGINGFACE_API_KEY:
+        logger.error("HUGGINGFACE_API_KEY не задан!")
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {HUGGINGFACE_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "inputs": prompt,
+        "options": {"wait_for_model": True} # Ждем, если модель загружается на сервере
+    }
     
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=90.0) as client:
         try:
-            response = await client.get(image_url)
+            response = await client.post(HF_API_URL, headers=headers, json=payload)
             if response.status_code == 200:
                 return response.content
             else:
-                logger.error(f"Ошибка генератора картинок: {response.status_code}")
+                logger.error(f"Ошибка Hugging Face API ({response.status_code}): {response.text}")
                 return None
         except Exception as e:
-            logger.error(f"Исключение при запросе картинки: {e}")
+            logger.error(f"Исключение при запросе картинки на HF: {e}")
             return None
 
 
@@ -104,7 +117,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text and not image_url:
         return
 
-    # 1. Проверяем, просит ли пользователь нарисовать что-то конкретное
+    # 1. Проверяем запрос на генерацию картинки
     is_image_request = any(kw in lower_text for kw in ["нарисуй", "сделай картинку", "сгенерируй", "создай изображение"])
 
     if is_image_request:
@@ -116,15 +129,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not prompt_for_image:
             prompt_for_image = user_text
 
-        image_bytes = await generate_free_image(prompt_for_image)
+        image_bytes = await generate_hf_image(prompt_for_image)
         
         if image_bytes:
             photo_stream = io.BytesIO(image_bytes)
             photo_stream.name = "generated_image.jpg"
-            await update.message.reply_photo(photo=photo_stream, caption="Держи.")
+            await update.message.reply_photo(photo=photo_stream, caption="Держи твой заказ.")
             return
         else:
-            await update.message.reply_text("Генератор картинок приболел, попробуй еще раз через секунду.")
+            await update.message.reply_text("Модель на Hugging Face сейчас разогревается или ключ отклонен. Попробуй еще раз через минуту.")
             return
 
     # 2. Инициализация памяти чата
@@ -176,7 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "cyberpunk panther sitting in a neon-lit alley, highly detailed",
             "epic movie still, cinematic tension, dramatic atmosphere"
         ]
-        image_bytes = await generate_free_image(random.choice(fun_prompts))
+        image_bytes = await generate_hf_image(random.choice(fun_prompts))
         if image_bytes:
             photo_stream = io.BytesIO(image_bytes)
             photo_stream.name = "surprise.jpg"
@@ -186,7 +199,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Если вопрос выглядит так, будто требует свежей инфы из интернета — делаем поиск
+    # Поиск в интернете при необходимости
     search_keywords = ["кто такой", "что за", "трек", "песня", "новости", "последни", "свеж", "когда вышел", "почему", "что случилось"]
     if any(kw in lower_text for kw in search_keywords) and len(user_text) > 4:
         search_result = search_web(user_text)
@@ -246,7 +259,7 @@ def main():
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    logger.info(f"Прокачанная Пантера запущена. Модель: {GROQ_MODEL}")
+    logger.info(f"Пантера с Hugging Face токеном запущена. Модель: {GROQ_MODEL}")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
