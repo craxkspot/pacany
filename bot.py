@@ -3,7 +3,7 @@ import asyncio
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
-from telegram import Update
+from telegram import Update, ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from google import genai
 from google.genai import errors
@@ -34,7 +34,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
-    # Отключаем лишний вывод логов сервера в консоль
     def log_message(self, format, *args):
         return
 
@@ -48,27 +47,42 @@ def run_web_server():
 
 # 2. Функция обработки сообщений от пользователей
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
     user_message = update.message.text
     user_name = update.effective_user.first_name
     logger.info(f"Получено сообщение от {user_name}: {user_message}")
 
+    reply_text = None
+
+    # Попытка №1: через основную модель gemini-3.8-flash
     try:
-        # Используем актуальную модель, которую порекомендовало API
         response = client.models.generate_content(
             model='gemini-3.8-flash',
             contents=user_message,
         )
-        
         reply_text = response.text
-        await update.message.reply_text(reply_text)
-
-    except errors.APIError as e:
-        logger.error(f"Ошибка Gemini API: {e}")
-        await update.message.reply_text(f"Ошибка со стороны ИИ: {e}")
     except Exception as e:
-        import traceback
-        logger.error(f"Критическая ошибка:\n{traceback.format_exc()}")
-        await update.message.reply_text(f"Ой, мои мыслительные процессы сломались! Ошибка: {e}")
+        logger.warning(f"Основная модель недоступна, пробуем запасную. Ошибка: {e}")
+        
+        # Попытка №2: запасной вариант gemini-1.5-flash
+        try:
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=user_message,
+            )
+            reply_text = response.text
+        except Exception as e2:
+            logger.error(f"Обе модели недоступны:\n{e2}")
+            reply_text = "Серверы Google сейчас перегружены. Попробуй написать еще раз через пару секунд!"
+
+    try:
+        # Пытаемся отправить с Markdown-разметкой, чтобы звёздочки превращались в жирный текст
+        await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        # Если модель сгенерировала «сломанный» Markdown (незакрытые символы), отправляем без разметки, чтобы не было ошибки
+        await update.message.reply_text(reply_text)
 
 
 # 3. Главная функция запуска бота
@@ -80,7 +94,7 @@ def main():
         logger.error("Не задан GEMINI_API_KEY в переменных окружения!")
         return
 
-    # Запускаем веб-сервер в отдельном потоке, чтобы Render видел открытый порт
+    # Запускаем веб-сервер в отдельном потоке
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
