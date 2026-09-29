@@ -98,13 +98,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Обработка команд генерации картинок
-    image_triggers = ["нарисуй", "сделай картинку", "сгенерируй", "создай изображение"]
+    image_triggers = ["нарисуй", "сделай картинку", "сгенерируй", "создай изображение", "сделай фото"]
     if any(kw in lower_text for kw in image_triggers):
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         
-        prompt_for_image = user_text
-        for kw in image_triggers:
+        # Вычищаем триггеры, слово "фото" и имя бота, чтобы они не ломали смысл картинки
+        prompt_for_image = lower_text
+        for kw in image_triggers + ["пантера", "pantera", "фото", "картинку"]:
             prompt_for_image = prompt_for_image.replace(kw, "").strip()
+            
         if not prompt_for_image:
             prompt_for_image = user_text
 
@@ -112,10 +114,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             enh_resp = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
                 messages=[
-                    {"role": "system", "content": "Translate and expand this image prompt into a detailed English prompt for an image generator. Output ONLY the English prompt."},
+                    {"role": "system", "content": "You are an expert prompt engineer for AI image generators. The user is asking a bot to draw something. Extract ONLY the core subject the user wants to see. Translate it into a highly detailed, cinematic English prompt for Midjourney. Output ONLY the English prompt. Do not output any conversational text."},
                     {"role": "user", "content": prompt_for_image}
                 ],
-                max_tokens=100
+                max_tokens=150
             )
             detailed_prompt = enh_resp.choices[0].message.content.strip()
         except Exception:
@@ -131,17 +133,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать картинку, сервер не отвечает.")
             return
 
-    # Инициализация истории чата (Умный системный промпт)
+    # Инициализация истории чата (Умный системный промпт с жесткими правилами)
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ты — умный, проницательный и адекватный ИИ-собеседник. Твоя задача — общаться естественно, "
-                    "как живой, эрудированный человек. Ты умеешь поддерживать диалог, шутить, рассуждать и помогать по делу. "
-                    "Подстраивайся под вайб чата. Не будь занудным роботом, не пиши огромные скучные тексты без причины, "
-                    "но и не скатывайся в бред. Если тебе дают информацию из поиска, используй её грамотно. "
-                    "НИКОГДА не используй символы вроде звездочек (** или *) для выделения текста — пиши обычным текстом."
+                    "Ты — умный, живой и адекватный ИИ-собеседник. Общайся естественно, как эрудированный человек, "
+                    "подстраивайся под вайб чата. У тебя ЕСТЬ встроенный доступ к интернету. НИКОГДА не говори, что "
+                    "у тебя нет доступа к сети, что ты не можешь гуглить или что ты оффлайн-модель. Поиск работает. "
+                    "Пиши ТОЛЬКО обычным текстом. СТРОГО запрещено использовать Markdown-разметку (никаких звездочек)."
                 )
             }
         ]
@@ -154,7 +155,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_histories[chat_id].append({"role": "user", "content": msg_content})
     
-    # Безопасное ограничение длины истории (сохраняем контекст, не ломая бота)
+    # Безопасное ограничение длины истории
     if len(chat_histories[chat_id]) > 14:
         system_prompt = chat_histories[chat_id][0]
         recent_msgs = chat_histories[chat_id][-13:]
@@ -172,24 +173,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Проверка: нужен ли поиск в интернете (ИСПРАВЛЕНА СКОБКА ЗДЕСЬ)
+    # Умная проверка на необходимость поиска
     try:
         check_resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "Does this message require looking up real-time info, news, facts, or specific people/entities on the web? Answer ONLY 'YES' or 'NO'."},
+                {"role": "system", "content": "Does this message mention a specific person, artist, brand, fact, news, or require looking up real-time information? Answer ONLY 'YES' or 'NO'."},
                 {"role": "user", "content": user_text}
             ],
             max_tokens=5
-        ) # <- Вот тут была квадратная скобка ']', из-за которой всё падало. Теперь круглая ')'.
-        
+        )
         decision = check_resp.choices[0].message.content.strip().upper()
         if "YES" in decision:
             search_result = search_web(user_text)
             if search_result:
                 chat_histories[chat_id].append({
                     "role": "system", 
-                    "content": f"Свежая информация из интернета, используй её для ответа:\n{search_result}"
+                    "content": f"Вот информация из интернета (DuckDuckGo), используй её для ответа, не упоминай сам процесс поиска:\n{search_result}"
                 })
     except Exception as e:
         logger.error(f"Ошибка при попытке поиска: {e}")
@@ -200,11 +200,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             model=GROQ_MODEL,
             messages=chat_histories[chat_id],
             max_tokens=400,
-            temperature=0.75, # Хороший баланс между логикой и креативностью
+            temperature=0.75,
         )
         reply_text = response.choices[0].message.content
         
         if reply_text:
+            # ЖЕСТКАЯ ЗАЧИСТКА: физически вырезаем все звездочки из ответа перед отправкой
+            reply_text = reply_text.replace("*", "")
             chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
         else:
             reply_text = "Я тут, но что-то сбилось в мыслях."
