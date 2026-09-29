@@ -33,7 +33,7 @@ groq_client = OpenAI(
 
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
-# Твои оригинальные модели
+# Твои модели
 TEXT_MODEL = "qwen/qwen3.8-27b"
 VISION_MODEL = "llama-3.2-11b-vision-preview"
 
@@ -181,24 +181,28 @@ async def generate_image(prompt: str) -> bytes | None:
     return None
 
 
-# --- ПОИСК TAVILY ---
+# --- ПОИСК TAVILY (ИЩЕТ ПО ЛЮБОМУ ЗАПРОСУ) ---
 def search_web_tavily(query: str) -> str:
     if not tavily_client:
         return ""
     
-    # Очищаем запрос от обращения к боту и знаков препинания
+    # Очищаем только лишние слова-обращения и служебные знаки
     clean_query = re.sub(
-        r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найди|загугли|гугл)\b|[^\w\s]', 
+        r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найди|загугли|гугл|посмотри|чекни|поищи)\b|[^\w\s#]', 
         '', 
         query
     ).strip()
     
-    # Если остался короткий мусор (меньше 3 символов), поиск не вызываем
+    # Если запрос состоят только из обращения к боту, ищем по полному исходному тексту
+    if len(clean_query) < 3:
+        clean_query = query.strip()
+
+    # Если текст всё равно слишком короткий (например, "ку", "ало"), поиск не делаем
     if len(clean_query) < 3:
         return ""
 
     try:
-        response = tavily_client.search(query=clean_query, search_depth="basic", max_results=3)
+        response = tavily_client.search(query=clean_query, search_depth="basic", max_results=4)
         results = [item['content'] for item in response.get('results', [])]
         if results:
             return "\n".join(results)
@@ -304,11 +308,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {
                 "role": "system", 
                 "content": (
-                    "Ты — адекватный, живой ИИ-собеседник. Ты подстраиваешься под вайб чата. "
+                    "Ты — Пантера, живой и умный ИИ-собеседник в Telegram.\n"
                     "ПРАВИЛА:\n"
-                    "1. Используй факты о пользователях из переданного JSON контекста, если они уместны.\n"
-                    "2. Не придумывай лишней конспирологии, понимай сленг (например 'ЗБС' — это сокращение от 'заебись' / круто).\n"
-                    "3. Пиши ТОЛЬКО обычным плоским текстом без звездочек и Markdown."
+                    "1. У тебя ЕСТЬ доступ к веб-поиску в реальном времени (данные автоматически подгружаются в блок [ДАННЫЕ ИЗ ПОИСКА]). "
+                    "СТРОГО ЗАПРЕЩЕНО писать, что у тебя 'нет доступа к интернету', 'нет доступа к базам данных', Spotify, Genius или VK. "
+                    "Если информация нашлась в поиске — используй её. Если информации нет — спокойно отвечай, что не нашёл точных данных по запросу.\n"
+                    "2. Используй факты о пользователях из переданного JSON контекста, если они уместны.\n"
+                    "3. Понимай сленг и контекст разговора.\n"
+                    "4. Пиши обычным текстом без звездочек и Markdown."
                 )
             }
         ]
@@ -346,14 +353,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "real_facts": u_data["facts"]
         })
 
-    # Поиск информации
+    # АВТОМАТИЧЕСКИЙ ВЕБ-ПОИСК ДЛЯ ВСЕХ ТЕКСТОВЫХ СООБЩЕНИЙ
     search_context = ""
-    if not base64_image:
-        needs_search_keywords = ["кто", "что", "знаешь", "найди", "загугли", "гугл", "инфа", "расскажи про"]
-        should_search = any(kw in lower_text for kw in needs_search_keywords)
-
-        if should_search:
-            search_context = search_web_tavily(user_text)
+    if not base64_image and user_text:
+        search_context = search_web_tavily(user_text)
 
     messages_to_send = list(chat_histories[chat_id])
     messages_to_send[0] = {
@@ -361,7 +364,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "content": (
             chat_histories[chat_id][0]["content"] +
             f"\n[ДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ]: {json.dumps(known_users_context, ensure_ascii=False)}\n" +
-            (f"\n[ДАННЫЕ ИЗ ПОИСКА]: {search_context}" if search_context else "")
+            (f"\n[ДАННЫЕ ИЗ ПОИСКА В ИНТЕРНЕТЕ]:\n{search_context}" if search_context else "\n[ДАННЫЕ ИЗ ПОИСКА]: Поиск не дал результатов.")
         )
     }
 
