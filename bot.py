@@ -23,6 +23,10 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TARGET_USERNAME = "soult0ken"
 AUDIO_MODEL = "whisper-large-v3-turbo"
 
+# --- НАСТРОЙКИ ВЕРОЯТНОСТЕЙ ---
+TARGET_ROAST_CHANCE = 0.30  # 30% шанс подколоть Валеру (0.30 = 30%, 1.0 = 100%)
+GLOBAL_ROAST_CHANCE = 0.05  # 5% шанс написать "я валера" на сообщения других людей
+
 groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
@@ -114,7 +118,7 @@ def get_active_models() -> tuple[str, str]:
 
 TEXT_MODEL, VISION_MODEL = get_active_models()
 
-# Фразы для глобального 5% шанса в чате
+# Фразы для глобального шанса в чате
 VALERA_IMPERSONATIONS = [
     "я валера",
     "я валера и я одобряю этот бред",
@@ -305,17 +309,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     username = user.username.lower() if user.username else ""
 
-    # 1. ГЛОБАЛЬНЫЙ 5% ШАНС: написать "я валера" на ЛЮБОЕ сообщение в чате
-    if random.random() < 0.05:
+    # 1. ГЛОБАЛЬНЫЙ ШАНС (написать "я валера" на ЛЮБОЕ сообщение в чате)
+    if random.random() < GLOBAL_ROAST_CHANCE:
         valera_phrase = random.choice(VALERA_IMPERSONATIONS)
-        logger.info(f"🎲 5% глобальный шанс сработал! Отправляем: '{valera_phrase}'")
+        logger.info(f"🎲 Глобальный шанс сработал! Отправляем: '{valera_phrase}'")
         await update.message.reply_text(valera_phrase)
         return
 
-    # 2. ПЕРСОНАЛЬНЫЙ 5% ШАНС: подколоть Валеру (@soult0ken)
+    # 2. ПЕРСОНАЛЬНЫЙ ШАНС: подколоть Валеру (@soult0ken)
     if username == TARGET_USERNAME:
-        if random.random() < 0.05:
-            logger.info("🎯 5% шанс сработал на Валеру!")
+        if random.random() < TARGET_ROAST_CHANCE:
+            logger.info(f"🎯 Шанс сработал на Валеру ({TARGET_ROAST_CHANCE*100}%)!")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
             roast_text = ""
@@ -363,7 +367,7 @@ def main():
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Только одна команда для проверки живой ли бот
+    # Команда для проверки живой ли бот
     application.add_handler(CommandHandler("ping", ping_command))
     
     # Обработчик обычных сообщений
