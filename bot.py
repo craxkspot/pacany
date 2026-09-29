@@ -23,23 +23,19 @@ logger = logging.getLogger(__name__)
 
 # --- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-# Теперь используем ключ от OpenRouter (переменная может называться OPENROUTER_API_KEY или GROQ_API_KEY, подставь свою)
 API_KEY = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GROQ_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 
 MASTER_USERNAME = "muctep_kpunep"
 
-# Подключаемся к OpenRouter вместо Groq
+# Подключаемся к OpenRouter
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=API_KEY
 ) if API_KEY else None
 
-# Выбираем стабильные бесплатные модели на OpenRouter
-# (Текст — умная модель с хорошим контекстом, Зрение — поддерживающая картинки бесплатная модель)
 TEXT_MODEL = "google/gemma-2-9b-it:free"
-VISION_MODEL = "google/gemma-2-9b-it:free"  # Либо можно указать qwen или другую мультимодальную
-AUDIO_MODEL = None  # Аудио пока оставим на текстовый фолбэк, чтобы не зависеть от сторонних ушей
+VISION_MODEL = "google/gemma-2-9b-it:free"
 
 # --- КОНТЕКСТ ЧАТОВ (ПАМЯТЬ ДО 50 СООБЩЕНИЙ) ---
 chat_histories = defaultdict(lambda: deque(maxlen=50))
@@ -94,9 +90,10 @@ def run_web_server():
     HTTPServer(("0.0.0.0", port), HealthCheckHandler).serve_forever()
 
 
-# --- ГЕНЕРАТОР ТЕКСТА (ТОКСИЧНЫЙ СОБЕСЕДНИК) ---
+# --- ГЕНЕРАТОР ТЕКСТА С ПОДРОБНЫМ ЛОГИРОВАНИЕМ ОШИБОК ---
 async def generate_text_roast(chat_id: int, sender_username: str, user_text: str) -> str:
     if not client:
+        logger.error("❌ API-клиент не инициализирован (нет ключа)!")
         return "мозги отключены, нет апи ключа"
 
     search_keywords = ["кто такой", "что такое", "когда", "где", "найди", "погугли", "курс", "цена", "почему", "сколько"]
@@ -121,6 +118,7 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
     messages.append({"role": "user", "content": user_text})
 
     try:
+        logger.info(f"Отправляем запрос в модель {TEXT_MODEL}...")
         response = client.chat.completions.create(
             model=TEXT_MODEL, messages=messages, max_tokens=300, temperature=0.7
         )
@@ -140,8 +138,10 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
         chat_histories[chat_id].append({"role": "user", "content": user_text})
         chat_histories[chat_id].append({"role": "assistant", "content": reply})
         return reply
+        
     except Exception as e:
-        logger.error(f"Ошибка текста: {e}", exc_info=True)
+        # ТУТ ВЫВЕДЕТСЯ ПОЛНЫЙ ТЕКСТ ОШИБКИ ОТ API В ЛОГИ RENDER
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА API при генерации текста: {e}", exc_info=True)
         return "у меня словесный понос, апи лагает"
 
 
@@ -254,7 +254,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not should_reply:
         if text: 
             chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag}]: {text}"})
-        if not text and (update.message.photo or update.message.sticker or update.message.video or update.message.voice or update.message.animation):
+        if not text and (update.message.photo or update.message.sticker or update.message.video or update.message.voice or update.message.video_note or update.message.animation):
              chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag} отправил медиафайл]"})
         return
 
@@ -292,7 +292,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             roast_text = await generate_text_roast(chat_id, username, f"[{user_tag}]: {text}")
 
     except Exception as e:
-        logger.error(f"❌ Глобальная ошибка обработки сообщения: {e}", exc_info=True)
+        logger.error(f"❌ Глобальная ошибка обработки сообщения в хендлере: {e}", exc_info=True)
         roast_text = "у меня крыша едет от ваших сообщений, ошибка в ядре"
 
     if roast_text:
