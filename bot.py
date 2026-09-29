@@ -271,32 +271,38 @@ def print_startup_status_table() -> bool:
     return bool(TELEGRAM_TOKEN)
 
 
-# --- ГЛАВНЫЙ АЛГОРИТМ ПРИНЯТИЯ РЕШЕНИЯ ---
+# --- ГЛАВНЫЙ АЛГОРИТМ ПРИНЯТИЯ РЕШЕНИЯ С ПОДРОБНЫМИ ЛОГАМИ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.from_user or update.message.from_user.is_bot:
+    if not update.message or not update.message.from_user:
+        return
+
+    if update.message.from_user.is_bot:
+        logger.info("Пропущено сообщение от другого бота.")
         return
 
     chat_id = update.effective_chat.id
     username = update.message.from_user.username or update.message.from_user.first_name
     text = update.message.text or update.message.caption or ""
 
-    user_tag = username  # Без символа @, чтобы бот не уходил в спам тегов
+    user_tag = username  
 
-    # 1. Проверяем, адресовано ли сообщение боту напрямую
+    # 1. Проверяем триггеры
     is_reply_to_bot = bool(update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id)
     is_addressed = any(word in text.lower() for word in ["валер", "валера", "валерон"])
-    
-    # 2. Рандомный шанс вклиниться в диалог (10%)
     is_random_reply = random.random() < 0.10
 
-    # 3. Итоговое решение
     should_reply = is_addressed or is_reply_to_bot or is_random_reply
+
+    logger.info(
+        f"💬 Входящее от [{username}] в чате {chat_id}: '{text[:30]}...' | "
+        f"Адресовано: {is_addressed}, Ответ боту: {is_reply_to_bot}, Рандом (10%): {is_random_reply} -> Решение отвечать: {should_reply}"
+    )
 
     if not should_reply:
         if text: 
             chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag}]: {text}"})
         if not text and (update.message.photo or update.message.sticker or update.message.video or update.message.voice or update.message.video_note or update.message.animation):
-            chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag} отправил медиафайл]"})
+             chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag} отправил медиафайл]"})
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -305,11 +311,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # ОБРАБОТКА МЕДИА
         if update.message.photo:
+            logger.info("Обрабатываем фото...")
             f = await update.message.photo[-1].get_file()
             b = await f.download_as_bytearray()
             roast_text = await generate_image_roast(chat_id, username, bytes(b), text, "фото")
             
         elif update.message.sticker:
+            logger.info("Обрабатываем стикер...")
             if update.message.sticker.is_animated or update.message.sticker.is_video:
                 roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул анимированный стикер. Обосри его за эти шевелящиеся картинки для детей]")
             else:
@@ -319,27 +327,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
         elif update.message.animation or update.message.video:
             media = "гифку" if update.message.animation else "видео"
+            logger.info(f"Обрабатываем {media}...")
             roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул {media}. Жестко пройдись по нему за то, что он засоряет чат движущимся калом, который тебе лень смотреть]")
             
         elif update.message.voice or update.message.video_note or update.message.audio:
             media_name = "голосовуху" if update.message.voice else ("кружок" if update.message.video_note else "музыку")
+            logger.info(f"Обрабатываем аудио ({media_name})...")
             ext = ".ogg" if update.message.voice else ".mp4"
-            
             file_obj = update.message.voice or update.message.video_note or update.message.audio
             f = await file_obj.get_file()
             b = await f.download_as_bytearray()
             roast_text = await generate_audio_roast(chat_id, username, bytes(b), ext, media_name)
             
         else:
-            # ОБРАБОТКА ОБЫЧНОГО ТЕКСТА
+            logger.info("Генерируем текстовый ответ...")
             roast_text = await generate_text_roast(chat_id, username, f"[{user_tag}]: {text}")
 
     except Exception as e:
-        logger.error(f"Глобальная ошибка обработки сообщения: {e}")
-        roast_text = await generate_text_roast(chat_id, username, f"[произошла внутренняя системная ошибка телеграм-бота при обработке. Спихни вину на пользователя, скажи что он всё сломал своим кривым сообщением]")
+        logger.error(f"❌ Глобальная ошибка обработки сообщения: {e}", exc_info=True)
+        roast_text = "у меня крыша едет от ваших сообщений, ошибка в ядре"
 
     if roast_text:
+        logger.info(f"Отправляем ответ в чат {chat_id}: {roast_text[:50]}...")
         await update.message.reply_text(roast_text)
+    else:
+        logger.warning(f"⚠️ Текст ответа пустой! Ничего не отправлено.")
 
 
 def main():
