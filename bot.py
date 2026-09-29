@@ -108,7 +108,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not prompt_for_image:
             prompt_for_image = user_text
 
-        # Просим модель нормально перевести и развернуть запрос для генератора, чтобы не было херни
+        # Просим модель нормально перевести и развернуть запрос для генератора
         try:
             enh_resp = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
@@ -132,7 +132,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать картинку.")
             return
 
-    # Инициализация истории чата без навязанного дебильного поведения
+    # Инициализация истории чата
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
@@ -148,7 +148,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if image_url:
         user_content = [
-            {"type": "text", "text": f"{user_name}: {user_text}" if user_text else f"{user_name прислал картинку."},
+            {"type": "text", "text": f"{user_name}: {user_text}" if user_text else f"{user_name} прислал картинку."},
             {"type": "image_url", "image_url": {"url": image_url}}
         ]
     else:
@@ -172,7 +172,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Спросим у языковой модели: нужен ли поиск в интернете для этого сообщения?
+    # Спросим у модели: нужен ли поиск в интернете для этого сообщения?
     try:
         check_resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -211,7 +211,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Groq error: {e}")
         reply_text = "ошибка сети"
 
-    # Отправка без всякого ParseMode, чтобы звезды не ломали текст
     try:
         await update.message.reply_text(reply_text)
     except Exception as e:
