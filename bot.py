@@ -70,10 +70,10 @@ def search_web(query: str) -> str:
         return "интернет-поиск временно отрыгнул"
 
 
-# --- АВТОМАТИЧЕСКИЙ ПОДБОР РАБОЧИХ МОДЕЛЕЙ ---
+# --- АВТОМАТИЧЕСКИЙ ПОДБОР РАБОЧИХ МОДЕЛЕЙ (ФИКС ДЕПРЕКЕЙТА) ---
 def get_active_models() -> tuple[str, str]:
     fallback_text = "llama-3.3-70b-versatile"
-    fallback_vision = "llama-3.2-11b-vision-preview"
+    fallback_vision = "llama-3.2-11b-vision"
 
     if not groq_client:
         return fallback_text, fallback_vision
@@ -83,7 +83,7 @@ def get_active_models() -> tuple[str, str]:
         available_ids = [m.id for m in models_data]
         logger.info(f"Доступные модели на Groq: {available_ids}")
 
-        banned = ["whisper", "vision", "embed", "guard", "audio"]
+        banned = ["whisper", "embed", "guard", "audio"]
         selected_text = None
         
         for m in available_ids:
@@ -96,9 +96,10 @@ def get_active_models() -> tuple[str, str]:
         if not selected_text and available_ids:
             selected_text = available_ids[0]
 
+        # Ищем актуальную vision-модель, избегая старых и депрекейкнутых
         selected_vision = None
         for m in available_ids:
-            if "vision" in m.lower():
+            if "vision" in m.lower() and "decommissioned" not in m.lower():
                 selected_vision = m
                 break
         
@@ -220,7 +221,6 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(list(chat_histories[chat_id]))
 
-        # Добавляем мультимодальный запрос в Vision-модель
         messages.append({
             "role": "user",
             "content": [
