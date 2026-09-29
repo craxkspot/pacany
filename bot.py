@@ -2,6 +2,7 @@ import os
 import random
 import logging
 import io
+import re
 import urllib.parse
 import httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -69,15 +70,29 @@ async def generate_image(prompt: str) -> bytes | None:
 
 
 def search_web(query: str) -> str:
-    """Поиск в интернете через DuckDuckGo"""
+    """Поиск в интернете через DuckDuckGo с очисткой запроса"""
+    # Очищаем запрос от обращений к боту
+    clean_query = re.sub(r'(?i)\b(пантера|pantera|ты знаешь|кто такой|что за|расскажи про|найти|загугли)\b', '', query).strip()
+    if not clean_query:
+        clean_query = query
+
     try:
         with DDGS() as ddgs:
-            results = [r.get('body', '') for r in ddgs.text(query, max_results=3)]
+            results = [r.get('body', '') for r in ddgs.text(clean_query, max_results=4)]
             if results:
                 return "\n".join(results)
     except Exception as e:
         logger.error(f"Ошибка поиска: {e}")
     return ""
+
+
+def is_image_request(text: str) -> bool:
+    """Проверка, запрашивает ли пользователь картинку (включая 'замути')"""
+    keywords = [
+        "нарисуй", "сделай картинку", "сгенерируй", "создай изображение", 
+        "сделай фото", "замути", "отрисуй", "покажи", "изобрази", "запили фотку", "запили картинку"
+    ]
+    return any(kw in text.lower() for kw in keywords)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -99,19 +114,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text and not image_url:
         return
 
-    # Обработка команд генерации картинок
-    image_triggers = ["нарисуй", "сделай картинку", "сгенерируй", "создай изображение", "сделай фото"]
-    if any(kw in lower_text for kw in image_triggers):
+    # 1. ОБРАБОТКА ГЕНЕРАЦИИ КАРТИНКИ
+    if is_image_request(lower_text):
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         
+        # Очищаем запрос от вводных слов
         prompt_for_image = lower_text
-        for kw in image_triggers + ["пантера", "pantera", "фото", "картинку"]:
-            prompt_for_image = prompt_for_image.replace(kw, "").strip()
+        remove_words = ["нарисуй", "сделай", "сгенерируй", "создай", "замути", "отрисуй", "покажи", "пантера", "pantera", "фотку", "фото", "картинку", "изображение"]
+        for word in remove_words:
+            prompt_for_image = re.sub(r'\b' + re.escape(word) + r'\b', '', prompt_for_image, flags=re.IGNORECASE).strip()
             
         if not prompt_for_image:
             prompt_for_image = user_text
 
-        # Промпт для бота-художника (учим его мемам)
+        # Промпт для генератора с ЖЕСТКИМ требованием сохранять детали
         try:
             enh_resp = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
@@ -119,11 +135,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {
                         "role": "system", 
                         "content": (
-                            "You are an expert prompt engineer for AI image generators. Translate the user's request into a highly detailed cinematic English prompt. "
-                            "CRITICAL: The user speaks in modern Russian internet slang, Twitch/TikTok memes, and gaming jargon (Dota 2, CS). "
-                            "Always interpret their words through the lens of Russian meme culture. "
-                            "Examples: 'пудж' = Pudge from Dota 2, 'скуф' = unkempt sloppy middle-aged russian man drinking beer, 'альтушка' = alt-girl, 'тюбик' = skinny weak guy, 'шлепа' = Big Floppa caracal cat, 'гигачад' = Gigachad meme. "
-                            "Output ONLY the English prompt. Do not output any conversational text."
+                            "You are an expert prompt engineer for AI image generators. Translate the user's request into a highly detailed English prompt. "
+                            "STRICT RULE: YOU MUST KEEP AND EXPLICITLY INCLUDE EVERY SINGLE DETAIL AND OBJECT requested by the user. "
+                            "If the user asks for a yurt with an American flag, you MUST write 'a traditional Kazakh yurt with an American flag displayed on it'. "
+                            "NEVER drop background objects, flags, clothing items, or specific elements. "
+                            "Output ONLY the English prompt. No markdown, no explanations."
                         )
                     },
                     {"role": "user", "content": prompt_for_image}
@@ -145,17 +161,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать картинку, сервер не отвечает.")
             return
 
-    # Системный промпт для текстового бота (прошивка на свойского чувака)
+    # 2. ИНИЦИАЛИЗАЦИЯ ИСТОРИИ ЧАТА (С зашитым запретом на галлюцинации)
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ты — крутой, живой ИИ-собеседник. Ты глубоко шаришь за постиронию, современные мемы рунета, Твич, ТикТок и геймерский сленг (Дота, КС). "
-                    "Ты отлично понимаешь слова типа скуф, масик, тюбик, штрих, альтушка, дед инсайд, база, кринж, сигма, нормис и общаешься на одном языке с чатом. "
-                    "Веди себя естественно, как эрудированный свой чувак, подстраивайся под вайб. "
-                    "У тебя ЕСТЬ встроенный доступ к интернету. НИКОГДА не говори, что у тебя нет сети или ты чего-то не можешь загуглить. "
-                    "Пиши ТОЛЬКО обычным плоским текстом. СТРОГО запрещено использовать Markdown-разметку (никаких звездочек)."
+                    "Ты — адекватный, живой ИИ-собеседник. Ты общаешься естественно, подстраиваешься под вайб чата, шаришь за иронию и сленг. "
+                    "КРИТИЧЕСКИ ВАЖНОЕ ПРАВИЛО ПО ФАКТАМ И ПОИСКУ: "
+                    "1. Если тебя спрашивают про конкретное место, человека, никнейм или событие (например, кто такой X или что за место Y), "
+                    "и у тебя НЕТ точной информации в результатах поиска — ЧЕСТНО скажи, что не знаешь или не нашел точной инфы в сети. "
+                    "2. СТРОГО ЗАПРЕЩЕНО выдумывать биографии людей, придумывать истории локальных мест или врать про тиктокеров/стримеров! "
+                    "3. Пиши ТОЛЬКО обычным плоским текстом. СТРОГО запрещено использовать Markdown-разметку (никаких звездочек)."
                 )
             }
         ]
@@ -184,32 +201,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
+    # 3. ПОИСК В СЕТИ
     try:
-        check_resp = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "Does this message mention a specific person, artist, brand, fact, news, or require looking up real-time information? Answer ONLY 'YES' or 'NO'."},
-                {"role": "user", "content": user_text}
-            ],
-            max_tokens=5
-        )
-        decision = check_resp.choices[0].message.content.strip().upper()
-        if "YES" in decision:
+        # Автоматически гуглим, если есть вопросительные слова или имена/названия
+        needs_search_keywords = ["кто", "что", "где", "когда", "почему", "знаешь", "знаешь ли", "найди", "инфа", "инфу"]
+        should_search = any(kw in lower_text for kw in needs_search_keywords) or len(user_text.split()) <= 4
+
+        if should_search:
             search_result = search_web(user_text)
             if search_result:
                 chat_histories[chat_id].append({
                     "role": "system", 
-                    "content": f"Вот информация из интернета (DuckDuckGo), используй её для ответа органично:\n{search_result}"
+                    "content": f"Результаты поиска в сети по запросу:\n{search_result}\nИспользуй эти данные для ответа."
+                })
+            else:
+                chat_histories[chat_id].append({
+                    "role": "system", 
+                    "content": "Поиск в сети не дал результатов по этому запросу. Если ты не уверен на 100% в ответе, честно ответь, что не нашел информации."
                 })
     except Exception as e:
         logger.error(f"Ошибка при попытке поиска: {e}")
 
+    # 4. ГЕНЕРАЦИЯ ОТВЕТА
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=chat_histories[chat_id],
             max_tokens=400,
-            temperature=0.8, # Чуть поднял температуру для большей живости и креатива в сленге
+            temperature=0.6, # Чуть снижена температура, чтобы было меньше галлюцинаций
         )
         reply_text = response.choices[0].message.content
         
@@ -217,10 +236,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_text = reply_text.replace("*", "")
             chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
         else:
-            reply_text = "Что-то процессор перегрелся, сорри."
+            reply_text = "Что-то мысль сбилась."
     except Exception as e:
         logger.error(f"Ошибка Groq API: {e}")
-        reply_text = "Мозг отвалился, я щас не на связи."
+        reply_text = "Не могу подсоединиться к серверу."
 
     try:
         await update.message.reply_text(reply_text)
