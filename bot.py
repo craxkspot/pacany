@@ -34,11 +34,61 @@ client = OpenAI(
     api_key=API_KEY
 ) if API_KEY else None
 
-TEXT_MODEL = "google/gemma-2-9b-it:free"
-VISION_MODEL = "google/gemma-2-9b-it:free"
-
 # --- КОНТЕКСТ ЧАТОВ (ПАМЯТЬ ДО 50 СООБЩЕНИЙ) ---
 chat_histories = defaultdict(lambda: deque(maxlen=50))
+
+
+# --- АВТОМАТИЧЕСКИЙ ПОИСК ЛУЧШИХ БЕСПЛАТНЫХ МОДЕЛЕЙ ---
+def get_active_models() -> tuple[str, str, str]:
+    selected_text, selected_vision, selected_audio = None, None, None
+
+    if not client:
+        return "meta-llama/llama-3.1-8b-instruct:free", "meta-llama/llama-3.1-8b-instruct:free", None
+
+    try:
+        logger.info("🔍 Запрашиваем список доступных моделей с OpenRouter...")
+        models_data = client.models.list().data
+        available_ids = [m.id for m in models_data]
+        logger.info(f"Всего доступно моделей: {len(available_ids)}")
+
+        # Ищем бесплатные модели (с суффиксом :free)
+        free_models = [m for m in available_ids if ":free" in m.lower()]
+        
+        # Стоп-слова для отсеивания служебного мусора
+        bad_words = ["embed", "tts", "guard", "safeguard", "audio", "code", "coder", "math"]
+
+        # 1. Текстовая модель (адекватная и умная)
+        text_candidates = [m for m in free_models if not any(bw in m.lower() for bw in bad_words) and "vision" not in m.lower()]
+        if text_candidates:
+            # Приоритет отдаем Llama или Gemma, если они есть
+            preferred = [m for m in text_candidates if "llama" in m.lower() or "gemma" in m.lower()]
+            selected_text = preferred[0] if preferred else text_candidates[0]
+
+        # 2. Модель со зрением (Vision)
+        vision_candidates = [m for m in free_models if ("vision" in m.lower() or "vl" in m.lower() or "qwen" in m.lower()) and not any(bw in m.lower() for bw in bad_words)]
+        if vision_candidates:
+            selected_vision = vision_candidates[0]
+        else:
+            selected_vision = selected_text  # Фоллбэк на текст
+
+        # 3. Аудиомодель (если есть в бесплатных)
+        audio_candidates = [m for m in free_models if "whisper" in m.lower() or "audio" in m.lower()]
+        if audio_candidates:
+            selected_audio = audio_candidates[0]
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка автоподбора моделей: {e}")
+
+    # Финальные фоллбэки, если автоподбор не сработал
+    fallback_text = "meta-llama/llama-3.1-8b-instruct:free"
+    return (
+        selected_text or fallback_text,
+        selected_vision or selected_text or fallback_text,
+        selected_audio
+    )
+
+
+TEXT_MODEL, VISION_MODEL, AUDIO_MODEL = get_active_models()
 
 
 # --- ПОИСК В ИНТЕРНЕТЕ ---
@@ -74,7 +124,7 @@ def search_web(query: str) -> str:
         return "интернет-поиск временно отрыгнул"
 
 
-# --- ВЕБ-СЕРВЕР ---
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -90,10 +140,9 @@ def run_web_server():
     HTTPServer(("0.0.0.0", port), HealthCheckHandler).serve_forever()
 
 
-# --- ГЕНЕРАТОР ТЕКСТА С ПОДРОБНЫМ ЛОГИРОВАНИЕМ ОШИБОК ---
+# --- ГЕНЕРАТОР ТЕКСТА ---
 async def generate_text_roast(chat_id: int, sender_username: str, user_text: str) -> str:
     if not client:
-        logger.error("❌ API-клиент не инициализирован (нет ключа)!")
         return "мозги отключены, нет апи ключа"
 
     search_keywords = ["кто такой", "что такое", "когда", "где", "найди", "погугли", "курс", "цена", "почему", "сколько"]
@@ -140,8 +189,7 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
         return reply
         
     except Exception as e:
-        # ТУТ ВЫВЕДЕТСЯ ПОЛНЫЙ ТЕКСТ ОШИБКИ ОТ API В ЛОГИ RENDER
-        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА API при генерации текста: {e}", exc_info=True)
+        logger.error(f"❌ Ошибка API при генерации текста: {e}", exc_info=True)
         return "у меня словесный понос, апи лагает"
 
 
@@ -198,16 +246,18 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
         
     except Exception as e:
         logger.error(f"❌ Ошибка Vision API при обработке {media_type}: {e}", exc_info=True)
-        return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но произошла ошибка обработки]")
+        return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но зрячая модель не справилась]")
 
 
 # --- КОМАНДА PING ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
-            "🤖 **Валера (OpenRouter Edition) на связи!**\n\n"
+            "🤖 **Валера (Auto-Model OpenRouter) на связи!**\n\n"
             f"• Папочка: `{MASTER_USERNAME}` ✅\n"
-            f"• Модель: `{TEXT_MODEL}`\n"
+            f"• Текст: `{TEXT_MODEL}`\n"
+            f"• Зрение: `{VISION_MODEL}`\n"
+            f"• Слух: `{AUDIO_MODEL or 'текстовый фолбэк'}`\n"
             f"• Память: `50 сообщений`"
         )
         await update.message.reply_text(status_msg, parse_mode="Markdown")
@@ -216,10 +266,11 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def print_startup_status_table() -> bool:
     table_log = f"""
 ┌────────────────────────────────────────────────────────────────────────┐
-│             ОТЧЕТ О ЗАПУСКЕ ВАЛЕРЫ (OPENROUTER)                        │
+│         ОТЧЕТ О ЗАПУСКЕ ВАЛЕРЫ (АВТОПОДБОР МОДЕЛЕЙ)                    │
 ├──────────────────────┬─────────────────────────────────────────────────┤
 │ Текстовая модель     │ {TEXT_MODEL:<47} │
 │ Зрячая модель        │ {VISION_MODEL:<47} │
+│ Аудиомодель          │ {str(AUDIO_MODEL):<47} │
 └──────────────────────┴─────────────────────────────────────────────────┘
 """
     logger.info(table_log)
@@ -254,7 +305,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not should_reply:
         if text: 
             chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag}]: {text}"})
-        if not text and (update.message.photo or update.message.sticker or update.message.video or update.message.voice or update.message.video_note or update.message.animation):
+        if not text and (update.message.photo or update.message.sticker or update.message.video or update.message.voice or update.message.animation):
              chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag} отправил медиафайл]"})
         return
 
@@ -284,7 +335,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         elif update.message.voice or update.message.video_note or update.message.audio:
             media_name = "голосовуху" if update.message.voice else ("кружок" if update.message.video_note else "музыку")
-            logger.info(f"Обрабатываем аудио ({media_name})... фаллбэк в текст")
+            logger.info(f"Обрабатываем аудио ({media_name})...")
             roast_text = await generate_text_roast(chat_id, username, f"[пользователь записал {media_name}. Высмей его за это]")
             
         else:
@@ -292,7 +343,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             roast_text = await generate_text_roast(chat_id, username, f"[{user_tag}]: {text}")
 
     except Exception as e:
-        logger.error(f"❌ Глобальная ошибка обработки сообщения в хендлере: {e}", exc_info=True)
+        logger.error(f"❌ Глобальная ошибка обработки сообщения: {e}", exc_info=True)
         roast_text = "у меня крыша едет от ваших сообщений, ошибка в ядре"
 
     if roast_text:
@@ -310,7 +361,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Валера на OpenRouter запущен!")
+    logger.info("🤖 Валера с автоподбором моделей запущен!")
     application.run_polling(drop_pending_updates=True)
 
 
