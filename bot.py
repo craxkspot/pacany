@@ -110,9 +110,9 @@ async def extract_and_verify_fact(text: str, author_name: str) -> str | None:
         f"Автор сообщения '{author_name}' написал: \"{text}\".\n"
         "Содержит ли этот текст РЕАЛЬНЫЙ, конкретный факт о ком-то из людей (например: профессия, возраст, хобби, домашние животные, реальные события из жизни)?\n"
         "ПРАВИЛА:\n"
-        "1. Игнорируй шутки, сарказм, метафоры (вроде 'съел слона'), оскорбления в шутливой форме, мемы и очевидный бред.\n"
+        "1. Игнорируй шутки, сарказм, метафоры, оскорбления в шутливой форме, мемы и очевидный бред.\n"
         "2. Если это шутка или пустые слова, ответь строго одним словом: NO.\n"
-        "3. Если это реальный факт, сформулируй его коротко на русском языке (например: 'Работает программистом', 'Купил новую видеокарту'). Выдай ТОЛЬКО этот факт без лишних слов."
+        "3. Если это реальный факт, сформулируй его коротко на русском языке. Выдай ТОЛЬКО этот факт без лишних слов."
     )
     try:
         response = groq_client.chat.completions.create(
@@ -158,7 +158,7 @@ def search_web_tavily(query: str) -> str:
         return ""
     
     clean_query = re.sub(
-        r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найти|загугли|гугл|найди)\b', 
+        r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найди|загугли|гугл|найди)\b', 
         '', 
         query
     ).strip()
@@ -206,7 +206,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     save_cache(user_cache)
                     logger.info(f"Записан факт о {user_name}: {verified_fact}")
 
-    # Обработка вложений (Vision)
+    # Обработка вложений (Vision) — поддержка фото и прикрепленных медиа
     base64_image = None
     if update.message.photo:
         try:
@@ -283,14 +283,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recent_msgs = chat_histories[chat_id][-13:]
         chat_histories[chat_id] = [system_prompt] + recent_msgs
 
-    # Условия активации бота в группе
+    # Условия активации бота в группе (разрешаем реагировать на реплаи/упоминания даже от других ботов)
     is_reply_to_bot = (
         update.message.reply_to_message 
         and update.message.reply_to_message.from_user.id == context.bot.id
     )
     is_mentioned = "пантера" in lower_text or base64_image is not None
-    
-    # Бот реагирует, если прошло меньше 30 секунд после его собственного ответа (диалог вдогонку)
     recent_bot_activity = (chat_id in last_bot_message_time) and (time.time() - last_bot_message_time[chat_id] < 30)
 
     if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not recent_bot_activity and random.random() < 0.88:
@@ -329,14 +327,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_model = TEXT_MODEL
     if base64_image:
         active_model = VISION_MODEL
-        prompt_text = user_text if user_text else "Опиши, кто или что на этом фото."
+        prompt_text = user_text if user_text else "Опиши, что на этой картинке."
         messages_to_send[-1] = {
             "role": "user",
             "content": [
-                {"type": "text", "text": f"{user_name}: {prompt_text}"},
+                {"type": "text", "text": f"{user_name} прикрепил фото с текстом: {prompt_text}"},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}"
+                    }
                 }
             ]
         }
@@ -361,7 +361,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         sent_msg = await update.message.reply_text(reply_text)
-        # Фиксируем время ответа бота для распознавания сообщений вдогонку
         last_bot_message_time[chat_id] = time.time()
     except Exception as e:
         logger.error(f"Ошибка отправки Telegram: {e}")
