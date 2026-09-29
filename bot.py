@@ -60,7 +60,7 @@ def get_fallback_pool() -> list[str]:
             # Ставим Llama или Gemma на первые места, если они есть
             sorted_models = sorted(free_models, key=lambda x: 0 if "llama" in x.lower() or "gemma" in x.lower() else 1)
             logger.info(f"Найдено бесплатных моделей для пула: {len(sorted_models)}")
-            return sorted_models[:10]  длина пула для перебора
+            return sorted_models[:10]  # длина пула для перебора
     except Exception as e:
         logger.error(f"Не удалось подтянуть список моделей динамически: {e}")
 
@@ -208,7 +208,6 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
             ]
         })
 
-        # Пробуем отправить картинку по моделям из пула (если модель поддерживает Vision)
         for model_name in MODEL_POOL:
             try:
                 logger.info(f"Пробуем vision-запрос на модели: {model_name}...")
@@ -230,7 +229,6 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
     except Exception as e:
         logger.error(f"Ошибка обработки картинки: {e}")
 
-    # Если зрячие модели упали или не поддержали картинку — падаем на обычный текстовый роаст
     return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но я ослеп, разнеси текстом]")
 
 
