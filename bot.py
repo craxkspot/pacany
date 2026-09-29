@@ -29,52 +29,75 @@ groq_client = OpenAI(
 ) if GROQ_API_KEY else None
 
 
-# --- АВТОМАТИЧЕСКИЙ ПОДБОР ТЕКСТОВОЙ (LLAMA/QWEN) И ЗРЯЧЕЙ МОДЕЛЕЙ ---
+# --- ДИНАМИЧЕСКИЙ АВТОПОДБОР ДОСТУПНЫХ МОДЕЛЕЙ GROQ ---
 def get_active_models() -> tuple[str, str]:
-    default_text = "llama-3.1-8b-instant"
-    default_vision = "llama-3.2-11b-vision-preview"
+    fallback_text = "llama-3.3-70b-versatile"
+    fallback_vision = "llama-3.2-11b-vision-preview"
 
     if not groq_client:
-        return default_text, default_vision
+        return fallback_text, fallback_vision
 
     try:
         models_data = groq_client.models.list().data
         available_ids = [m.id for m in models_data]
+        logger.info(f"Доступные модели Groq в вашем аккаунте: {available_ids}")
 
-        # 1. Приоритетный список разговорных текстовых моделей (с учетом Qwen)
+        # 1. Отбираем текстовые разговорные модели (включая Qwen и Llama)
+        chat_candidates = [
+            m for m in available_ids
+            if not any(bad in m.lower() for bad in ["whisper", "vision", "guard", "embed", "safetensors"])
+        ]
+
         priority_text = [
             "llama-3.3-70b-versatile",
             "qwen-2.5-32b",
             "qwen-2.5-72b",
             "qwen2.5-72b-instruct",
-            "llama-3.1-8b-instant",
+            "llama-3.1-70b-versatile",
             "llama3-8b-8192",
             "gemma2-9b-it"
         ]
 
-        selected_text = default_text
+        selected_text = None
         for model in priority_text:
             if model in available_ids:
                 selected_text = model
                 break
 
-        # 2. Приоритетный список модели с поддержкой зрения (Vision)
+        if not selected_text and chat_candidates:
+            selected_text = chat_candidates[0]
+        elif not selected_text and available_ids:
+            selected_text = available_ids[0]
+        elif not selected_text:
+            selected_text = fallback_text
+
+        # 2. Отбираем модели с поддержкой зрения (Vision API)
+        vision_candidates = [
+            m for m in available_ids
+            if "vision" in m.lower() and "guard" not in m.lower()
+        ]
+
         priority_vision = [
             "llama-3.2-11b-vision-preview",
             "llama-3.2-90b-vision-preview"
         ]
 
-        selected_vision = default_vision
+        selected_vision = None
         for model in priority_vision:
             if model in available_ids:
                 selected_vision = model
                 break
 
+        if not selected_vision and vision_candidates:
+            selected_vision = vision_candidates[0]
+        elif not selected_vision:
+            selected_vision = fallback_vision
+
         return selected_text, selected_vision
 
     except Exception as e:
-        logger.error(f"Ошибка получения списка моделей: {e}")
-        return default_text, default_vision
+        logger.error(f"Не удалось получить список моделей через API Groq: {e}")
+        return fallback_text, fallback_vision
 
 
 TEXT_MODEL, VISION_MODEL = get_active_models()
@@ -216,8 +239,8 @@ def print_startup_status_table() -> bool:
         try:
             res = groq_client.chat.completions.create(
                 model=TEXT_MODEL,
-                messages=[{"role": "user", "content": "Скажи коротко ОК"}],
-                max_tokens=10,
+                messages=[{"role": "user", "content": "Напиши ровно один символ: OK"}],
+                max_tokens=5,
                 temperature=0.1
             )
             test_response = res.choices[0].message.content.strip()
@@ -225,7 +248,7 @@ def print_startup_status_table() -> bool:
                 text_status = "✅ РАБОТАЕТ"
                 is_working = True
             else:
-                test_response = "Пустой ответ модели"
+                test_response = "Пустой ответ от модели"
         except Exception as e:
             text_status = "❌ ОШИБКА API"
             test_response = str(e)
