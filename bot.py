@@ -25,7 +25,7 @@ TARGET_USERNAME = "soult0ken" # Вернешь потом, когда закон
 AUDIO_MODEL = "whisper-large-v3-turbo"
 
 # --- НАСТРОЙКИ ВЕРОЯТНОСТЕЙ ---
-TARGET_ROAST_CHANCE = 0.50  # Поставил 50% на время теста, чтобы чаще триггерилось
+TARGET_ROAST_CHANCE = 0.50  # 50% шанс на время теста
 GLOBAL_ROAST_CHANCE = 0.05  # 5% шанс написать "я валера" остальным
 
 groq_client = OpenAI(
@@ -162,22 +162,22 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- НОРМАЛЬНЫЙ ЕДКИЙ ТРОЛЛИНГ ТЕКСТА/ГС ---
+# --- МАКСИМАЛЬНО ТОКСИЧНЫЙ ТРОЛЛИНГ ТЕКСТА/ГС ---
 async def generate_text_roast(user_text: str) -> str:
     if not groq_client:
         return "Ну что за хуйню ты опять высрал."
 
     system_prompt = (
-        "Ты — токсичный и дерзкий тип из пацанского чата. Твоя задача — жестко, понятно и с матом "
-        "опустить собеседника за то, что он написал или сказал. Никакого бреда, шизофрении и поэзии.\n"
+        "Ты — максимально токсичный, отбитый и злой тип из токсичного чата. Никакой вежливости, "
+        "никаких нравоучений и морали. Твоя задача — жестко, грязно и с матом опустить оппонента за любое слово.\n"
         "ПРАВИЛА:\n"
-        "1. Пиши понятным языком, без абстрактных метафор и галлюцинаций.\n"
-        "2. Используй живой мат и нормальный сленг, можно высказаться на пару предложений, если есть что сказать.\n"
-        "3. Бей по фактам, высмеивай тупость или стиль общения.\n"
-        "4. Без звездочек, без Markdown, заканчивай мысль точкой."
+        "1. Не жалей мата, используй жесткий уличный сленг и реальный интернет-треш.\n"
+        "2. Если тебе пишут коротко или оскорбляют — отвечай в десять раз агрессивнее, унижай за тупость.\n"
+        "3. Никаких советов в стиле 'пиши нормально' — только лютый прожар и оскорбления.\n"
+        "4. Длина: 1-3 предложения. Без звездочек, без Markdown, заканчивай точкой."
     )
 
-    user_content = f"Собеседник сказал: \"{user_text}\"" if user_text else "Собеседник прислал какую-то хуйню без звука."
+    user_content = f"Собеседник написал: \"{user_text}\"" if user_text else "Собеседник прислал какую-то хуйню без текста."
 
     try:
         response = groq_client.chat.completions.create(
@@ -187,16 +187,16 @@ async def generate_text_roast(user_text: str) -> str:
                 {"role": "user", "content": user_content}
             ],
             max_tokens=120,
-            temperature=0.7
+            temperature=0.85
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Блять, даже нейросеть твой бред не осилила."
+        return reply if reply else "Блять, даже нейросеть твой высер проглотить не смогла."
     except Exception as e:
         logger.error(f"Ошибка текстовой генерации: {e}")
         return "Твои мысли сломали бота нахуй."
 
 
-# --- НОРМАЛЬНЫЙ ЕДКИЙ ТРОЛЛИНГ КАРТИНОК И ВИДЕО ---
+# --- МАКСИМАЛЬНО ТОКСИЧНЫЙ ТРОЛЛИНГ КАРТИНОК И ВИДЕО ---
 async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
     if not groq_client:
         return "Медиа твоё не прогрузилось, но уверен — там полная параша."
@@ -205,13 +205,11 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
         prompt_text = (
-            "Посмотри на это изображение или кружок, который тебе прислали. "
-            "Жестко, с матом и понятным сарказмом прокомментируй это. "
-            "Говори нормально, без шизофрении и стихов, можно развернуто на 2-3 предложения. "
-            "Без звездочек и Markdown, завершай точкой."
+            "Посмотри на это говно, которое тебе скинули. Обоссы это максимально жестко и с матом, "
+            "без всяких соплей и морали. Унижай автора за его вкус и за то, что он это прислал."
         )
         if caption:
-            prompt_text += f" Подпись: \"{caption}\"."
+            prompt_text += f" Подпись к этой хуйне: \"{caption}\"."
 
         response = groq_client.chat.completions.create(
             model=VISION_MODEL,
@@ -230,7 +228,7 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
                 }
             ],
             max_tokens=120,
-            temperature=0.7
+            temperature=0.85
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
         return reply if reply else "Ну и кал ты скинул, пиздец."
@@ -243,8 +241,8 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
-            "🤖 **Валера-Бот (Тестовый режим для всех) на связи!**\n\n"
-            f"• Статус ИИ: ✅ Готов душить всех\n"
+            "🤖 **Валера-Бот (Лютый режим) на связи!**\n\n"
+            f"• Статус ИИ: ✅ Готов унижать\n"
             f"• Текст: `{TEXT_MODEL}`\n"
             f"• Фото/Кружки: `{VISION_MODEL}`\n"
             f"• ГС: `{AUDIO_MODEL}`\n"
@@ -286,7 +284,7 @@ def print_startup_status_table() -> bool:
 ├──────────────────────┬─────────────────────────────────────────────────┤
 │ TELEGRAM_TOKEN       │ {tg_ok:<47} │
 │ GROQ_API_KEY         │ {key_ok:<47} │
-│ Режим теста          │ ВСЕ ПОЛЬЗОВАТЕЛИ (ВРЕМЕННО)                     │
+│ Режим теста          │ ВСЕ ПОЛЬЗОВАТЕЛИ (ЛЮТЫЙ ТРОЛЛИНГ)               │
 │ Текстовая модель     │ {TEXT_MODEL:<47} │
 │ Зрячая модель (Фото) │ {VISION_MODEL:<47} │
 │ Модель Whisper (ГС)  │ {AUDIO_MODEL:<47} │
@@ -316,7 +314,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. ТЕСТОВЫЙ ШАНС ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
     if random.random() < TARGET_ROAST_CHANCE:
-        logger.info(f"🎯 Тестовый троллинг сработал на пользователя @{user.username or user.first_name}!")
+        logger.info(f"🎯 Токсичный троллинг сработал на пользователя @{user.username or user.first_name}!")
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
         roast_text = ""
@@ -388,7 +386,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Тестовый Валера-бот запущен...")
+    logger.info("🤖 Лютый Валера-бот запущен...")
     
     application.run_polling(drop_pending_updates=True)
 
