@@ -49,20 +49,45 @@ def get_fallback_pool() -> list[str]:
     ]
     
     if not client:
+        logger.warning("⚠️ OpenRouter клиент не инициализирован (нет API ключа), используем дефолтный пул.")
         return default_pool
 
     try:
         logger.info("🔍 Сканируем доступные бесплатные модели с OpenRouter...")
-        models_data = client.models.list().data
-        free_models = [m.id for m in models_data if ":free" in m.lower() and not any(w in m.lower() for w in ["embed", "tts", "audio"])]
+        models_response = client.models.list()
+        
+        # Безопасно вытаскиваем строковые ID моделей (исправление ошибки объекта)
+        available_ids = []
+        for m in models_response.data:
+            if hasattr(m, "id"):
+                available_ids.append(str(m.id))
+            elif isinstance(m, dict) and "id" in m:
+                available_ids.append(str(m["id"]))
+
+        logger.info(f"📦 Всего получено моделей от API: {len(available_ids)}")
+
+        # Фильтруем только бесплатные и отсекаем служебный мусор
+        free_models = [
+            m_id for m_id in available_ids 
+            if ":free" in m_id.lower() 
+            and not any(w in m_id.lower() for w in ["embed", "tts", "audio", "guard"])
+        ]
         
         if free_models:
-            # Ставим Llama или Gemma на первые места, если они есть
-            sorted_models = sorted(free_models, key=lambda x: 0 if "llama" in x.lower() or "gemma" in x.lower() else 1)
-            logger.info(f"Найдено бесплатных моделей для пула: {len(sorted_models)}")
-            return sorted_models[:10]  # длина пула для перебора
+            # Сортируем: ставим Llama, Gemma и Mistral в приоритет
+            sorted_models = sorted(
+                free_models, 
+                key=lambda x: 0 if any(k in x.lower() for k in ["llama", "gemma", "mistral"]) else 1
+            )
+            logger.info(f"✅ Успешно отобрано бесплатных моделей для ротации: {len(sorted_models)}")
+            for idx, mod in enumerate(sorted_models[:10], 1):
+                logger.info(f"   {idx}. {mod}")
+            return sorted_models[:10]
+        else:
+            logger.warning("⚠️ В ответ от API не нашлось моделей с суффиксом :free, откатываемся на дефолтный пул.")
+            
     except Exception as e:
-        logger.error(f"Не удалось подтянуть список моделей динамически: {e}")
+        logger.error(f"❌ Не удалось подтянуть список моделей динамически: {e}", exc_info=True)
 
     return default_pool
 
@@ -120,7 +145,7 @@ def run_web_server():
     HTTPServer(("0.0.0.0", port), HealthCheckHandler).serve_forever()
 
 
-# --- УМНЫЙ ГЕНЕРАТОР ТЕКСТА С АВТОРОТАЦИЕЙ МОДЕЛЕЙ (ОБХОД 429/404) ---
+# --- УМНЫЙ ГЕНЕРАТОР ТЕКСТА С АВТОРОТАЦИЕЙ МОДЕЛЕЙ ---
 async def generate_text_roast(chat_id: int, sender_username: str, user_text: str) -> str:
     if not client:
         return "мозги отключены, нет апи ключа"
@@ -146,11 +171,11 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
     messages.extend(list(chat_histories[chat_id]))
     messages.append({"role": "user", "content": user_text})
 
-    # Перебираем модели из пула, пока какая-нибудь не ответит успешно (обход лимитов)
+    # Перебираем модели из пула (обход 429 и лимитов)
     global MODEL_POOL
     for model_name in MODEL_POOL:
         try:
-            logger.info(f"Пробуем модель: {model_name}...")
+            logger.info(f"🔄 [Текст] Пробуем модель: {model_name}")
             response = client.chat.completions.create(
                 model=model_name, messages=messages, max_tokens=300, temperature=0.7
             )
@@ -160,6 +185,7 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
             reply = reply.replace("*", "").strip()
 
             if not reply:
+                logger.warning(f"⚠️ Модель {model_name} вернула пустой текст, пробуем следующую...")
                 continue
 
             if reply.endswith("."):
@@ -168,15 +194,15 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
 
             chat_histories[chat_id].append({"role": "user", "content": user_text})
             chat_histories[chat_id].append({"role": "assistant", "content": reply})
-            logger.info(f"✅ Успешно ответила модель: {model_name}")
+            logger.info(f"✅ [Текст] Успешный ответ от модели: {model_name}")
             return reply
             
         except Exception as e:
-            logger.warning(f"⚠️ Модель {model_name} отрыгнула ошибку: {e}. Пробуем следующую...")
+            logger.warning(f"⚠️ Модель {model_name} упала с ошибкой: {e}. Переключаюсь на следующую в пуле...")
             continue
 
-    logger.error("❌ Все модели из пула исчерпали лимиты или недоступны!")
-    return "у меня словесный понос, все апишки легли в лимиты"
+    logger.error("❌ ВСЕ модели из пула исчерпали лимиты (429) или недоступны!")
+    return "у меня словесный понос, все бесплатные апишки легли в лимиты"
 
 
 # --- ОБРАБОТЧИК КАРТИНОК И СТИКЕРОВ ---
@@ -210,7 +236,7 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
 
         for model_name in MODEL_POOL:
             try:
-                logger.info(f"Пробуем vision-запрос на модели: {model_name}...")
+                logger.info(f"👁️ [Зрение] Пробуем vision-запрос на модели: {model_name}")
                 response = client.chat.completions.create(
                     model=model_name, messages=messages, max_tokens=200, temperature=0.7
                 )
@@ -222,12 +248,14 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
                         reply = reply[:-1]
                     chat_histories[chat_id].append({"role": "user", "content": f"[скинул {media_type}] {caption}"})
                     chat_histories[chat_id].append({"role": "assistant", "content": reply})
+                    logger.info(f"✅ [Зрение] Успешно обработано моделью: {model_name}")
                     return reply
-            except Exception:
+            except Exception as e:
+                logger.warning(f"⚠️ Модель {model_name} не смогла обработать картинку: {e}")
                 continue
 
     except Exception as e:
-        logger.error(f"Ошибка обработки картинки: {e}")
+        logger.error(f"❌ Ошибка обработки картинки в памяти: {e}")
 
     return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но я ослеп, разнеси текстом]")
 
@@ -295,13 +323,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if update.message.photo:
-            logger.info("Обрабатываем фото...")
+            logger.info("📸 Обрабатываем фото...")
             f = await update.message.photo[-1].get_file()
             b = await f.download_as_bytearray()
             roast_text = await generate_image_roast(chat_id, username, bytes(b), text, "фото")
             
         elif update.message.sticker:
-            logger.info("Обрабатываем стикер...")
+            logger.info("🖼️ Обрабатываем стикер...")
             if update.message.sticker.is_animated or update.message.sticker.is_video:
                 roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул анимированный стикер. Обосри его за эти картинки]")
             else:
@@ -311,16 +339,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
         elif update.message.animation or update.message.video:
             media = "гифку" if update.message.animation else "видео"
-            logger.info(f"Обрабатываем {media}...")
+            logger.info(f"🎥 Обрабатываем {media}...")
             roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул {media}. Пройдись по нему за это]")
             
         elif update.message.voice or update.message.video_note or update.message.audio:
             media_name = "голосовуху" if update.message.voice else ("кружок" if update.message.video_note else "музыку")
-            logger.info(f"Обрабатываем аудио ({media_name})...")
+            logger.info(f"🎤 Обрабатываем аудио ({media_name})...")
             roast_text = await generate_text_roast(chat_id, username, f"[пользователь записал {media_name}. Высмей его за это]")
             
         else:
-            logger.info("Генерируем текстовый ответ...")
+            logger.info("✍️ Генерируем текстовый ответ...")
             roast_text = await generate_text_roast(chat_id, username, f"[{user_tag}]: {text}")
 
     except Exception as e:
@@ -328,7 +356,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         roast_text = "у меня крыша едет от ваших сообщений, ошибка в ядре"
 
     if roast_text:
-        logger.info(f"Отправляем ответ в чат {chat_id}: {roast_text[:50]}...")
+        logger.info(f"📤 Отправляем ответ в чат {chat_id}: {roast_text[:50]}...")
         await update.message.reply_text(roast_text)
     else:
         logger.warning(f"⚠️ Текст ответа пустой! Ничего не отправлено.")
@@ -343,7 +371,8 @@ def main():
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
     logger.info("🤖 Валера с ротацией моделей запущен!")
-    application.run_polling(drop_pending_updates=True)
+    # drop_pending_updates=True автоматически гасит конфликты 409 при перезапуске на Render
+    application.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
