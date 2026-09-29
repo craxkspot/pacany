@@ -32,7 +32,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Защита от decompression bomb
 Image.MAX_IMAGE_PIXELS = 50_000_000
 
 
@@ -54,7 +53,7 @@ client = (
 )
 
 
-# --- ПАМЯТЬ ЧАТОВ (LRU + TTL + per-chat lock) ---
+# --- ПАМЯТЬ ЧАТОВ ---
 MAX_CHATS = 300
 CHAT_HISTORY_SIZE = 40
 CHAT_TTL_SECONDS = 6 * 60 * 60
@@ -103,7 +102,7 @@ def reset_history(chat_id: int) -> None:
     chat_last_seen.pop(chat_id, None)
 
 
-# --- ФИЛЬТР МУСОРА В ОТВЕТЕ ---
+# --- ФИЛЬТР МУСОРА ---
 BANNED_WORDS_RE = re.compile(
     r"\b(чож|чо\b|чот|валер\b|валера\b|валерон|дружище|братан|бро\b)",
     re.IGNORECASE,
@@ -118,18 +117,15 @@ def sanitize_reply(text: str) -> str:
     text = MARKDOWN_JUNK_RE.sub("", text)
     text = BANNED_WORDS_RE.sub("", text)
     text = re.sub(r"\s{2,}", " ", text).strip()
-    # убираем висящие запятые/точки с пробелами
     text = re.sub(r"\s+([,.!?;:])", r"\1", text)
-    # первая буква строчная, если это буква
     if text and text[0].isalpha() and text[0].isupper():
         text = text[0].lower() + text[1:]
-    # финальная точка не нужна
     if text.endswith("."):
         text = text[:-1]
     return text.strip()
 
 
-# --- ПУЛЫ МОДЕЛЕЙ ---
+# --- ПУЛЫ МОДЕЛЕЙ (правильное определение зрячих) ---
 DEFAULT_TEXT_MODELS = [
     "meta-llama/llama-3.1-8b-instruct:free",
     "google/gemma-2-9b-it:free",
@@ -142,49 +138,82 @@ DEFAULT_VISION_MODELS = [
     "google/gemini-2.0-flash-exp:free",
 ]
 
+# Модели, которые в этой сессии процесса уже провалились с "no image support".
+# Их больше не пробуем как зрячие.
+VISION_BLACKLIST: set = set()
+
+
+def _fetch_openrouter_models() -> list:
+    """Тянем полный список моделей с метаданными (architecture.input_modalities)."""
+    try:
+        r = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.error(f"Не смог получить список моделей OpenRouter: {e}")
+        return []
+
+
+def _supports_image(model_info: dict) -> bool:
+    """Проверяем именно architecture.input_modalities, а не имя."""
+    arch = model_info.get("architecture") or {}
+    mods = arch.get("input_modalities") or []
+    return isinstance(mods, list) and "image" in mods
+
+
+def _looks_like_utility(mid: str) -> bool:
+    bad = ["embed", "tts", "audio", "guard", "moderation", "rerank", "whisper"]
+    low = mid.lower()
+    return any(w in low for w in bad)
+
 
 def get_model_pools():
-    if not client:
+    data = _fetch_openrouter_models()
+
+    if not data:
+        logger.warning("OpenRouter не отдал модели, работаю на дефолтах")
         return DEFAULT_TEXT_MODELS, DEFAULT_VISION_MODELS
 
-    try:
-        logger.info("Сканируем бесплатные модели OpenRouter...")
-        models_response = client.models.list()
-        ids = []
-        for m in models_response.data:
-            mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
-            if mid:
-                ids.append(str(mid))
+    text_models = []
+    vision_models = []
 
-        free_models = [
-            mid
-            for mid in ids
-            if ":free" in mid.lower()
-            and not any(w in mid.lower() for w in ["embed", "tts", "audio", "guard", "moderation"])
-        ]
+    for m in data:
+        mid = m.get("id")
+        if not mid or ":free" not in mid.lower():
+            continue
+        if _looks_like_utility(mid):
+            continue
 
-        vision_kw = ["vision", "vl", "pixtral", "gemini", "flash", "multimodal"]
-        vision_models = [m for m in free_models if any(k in m.lower() for k in vision_kw)]
-        text_models = [m for m in free_models if m not in vision_models]
+        if _supports_image(m) and mid not in VISION_BLACKLIST:
+            vision_models.append(mid)
+        else:
+            text_models.append(mid)
 
-        if not vision_models:
-            vision_models = DEFAULT_VISION_MODELS
-        if not text_models:
-            text_models = DEFAULT_TEXT_MODELS
+    # Если зрячих вообще нет — не выдумываем, оставляем пул пустым.
+    # Фоллбэк на DEFAULT_VISION_MODELS включаем только если OpenRouter совсем недоступен.
+    # Здесь данные есть, значит честно сообщаем: зрячих :free нет.
+    if not text_models:
+        text_models = DEFAULT_TEXT_MODELS
 
-        logger.info(
-            f"Модели: текстовых {len(text_models)}, зрячих {len(vision_models)}"
+    logger.info(
+        f"Модели OpenRouter: текстовых {len(text_models)}, "
+        f"зрячих по input_modalities {len(vision_models)}"
+    )
+    if vision_models:
+        logger.info(f"Зрячие: {vision_models[:5]}")
+    else:
+        logger.warning(
+            "Среди бесплатных моделей OpenRouter сейчас нет ни одной, "
+            "которая официально принимает image на входе. Фото обрабатываться не будут."
         )
-        return text_models[:15], vision_models[:15]
 
-    except Exception as e:
-        logger.error(f"Автоподбор моделей упал: {e}")
-        return DEFAULT_TEXT_MODELS, DEFAULT_VISION_MODELS
+    return text_models[:20], vision_models[:20]
 
 
 TEXT_POOL, VISION_POOL = get_model_pools()
 PRIMARY_TEXT_MODEL = TEXT_POOL[0] if TEXT_POOL else DEFAULT_TEXT_MODELS[0]
-PRIMARY_VISION_MODEL = VISION_POOL[0] if VISION_POOL else DEFAULT_VISION_MODELS[0]
+PRIMARY_VISION_MODEL = VISION_POOL[0] if VISION_POOL else "(нет)"
 
 
 # --- ВЕБ-ПОИСК ---
@@ -315,20 +344,28 @@ async def generate_text_reply(chat_id: int, user_message_for_history: str, promp
     return ""
 
 
-# --- ГЕНЕРАЦИЯ ПО КАРТИНКАМ ---
+# --- КАРТИНКИ ---
 def _prepare_image(image_bytes: bytes) -> str:
     img = Image.open(io.BytesIO(image_bytes))
-    if img.mode in ("RGBA", "P", "LA"):
+    if img.mode != "RGB":
         img = img.convert("RGB")
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
-
     if max(img.size) > MAX_IMAGE_SIDE:
         img.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
-
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85, optimize=True)
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _is_no_image_support_error(e: Exception) -> bool:
+    s = str(e).lower()
+    markers = [
+        "no endpoints found that support image",
+        "does not support image",
+        "unsupported image",
+        "image input is not supported",
+        "invalid content type for image",
+    ]
+    return any(m in s for m in markers)
 
 
 async def generate_image_reply(
@@ -338,14 +375,23 @@ async def generate_image_reply(
     media_type: str,
     image_bytes: bytes,
 ) -> str:
+    """
+    Пытается получить осмысленный ответ по картинке.
+    Если ни одна зрячая модель не работает — возвращает пустую строку.
+    Никакого абстрактного текстового фоллбэка: лучше промолчать, чем выдать бред.
+    """
     if not client:
-        return "нет api-ключа, я туплю"
+        return ""
+
+    if not VISION_POOL:
+        logger.info("[зрение] пул пуст, на картинки не отвечаем")
+        return ""
 
     try:
         b64 = _prepare_image(image_bytes)
     except Exception as e:
         logger.warning(f"Не смог подготовить картинку: {e}")
-        return "картинка битая, даже смотреть не буду"
+        return ""
 
     user_prompt_text = caption.strip() if caption and caption.strip() else f"что тут на этом {media_type}?"
 
@@ -378,7 +424,9 @@ async def generate_image_reply(
         }
     )
 
-    for model_name in VISION_POOL:
+    tried = 0
+    for model_name in list(VISION_POOL):
+        tried += 1
         try:
             logger.info(f"[зрение] пробуем {model_name}")
             response = client.chat.completions.create(
@@ -391,6 +439,7 @@ async def generate_image_reply(
             reply_raw = (choice.message.content or "") if choice.message else ""
             reply = sanitize_reply(reply_raw)
             if not reply:
+                logger.info(f"[зрение] {model_name} дал пустой ответ")
                 continue
 
             with lock:
@@ -402,15 +451,24 @@ async def generate_image_reply(
             return reply
 
         except Exception as e:
-            logger.warning(f"[зрение] {model_name} упала: {e}")
+            if _is_no_image_support_error(e):
+                logger.warning(
+                    f"[зрение] {model_name} не принимает картинки, добавляю в блэклист"
+                )
+                VISION_BLACKLIST.add(model_name)
+                try:
+                    VISION_POOL.remove(model_name)
+                except ValueError:
+                    pass
+            else:
+                logger.warning(f"[зрение] {model_name} упала: {e}")
             continue
 
-    logger.warning("[зрение] все зрячие модели упали, откат на текст")
-    return await generate_text_reply(
-        chat_id,
-        user_message_for_history,
-        f"[пользователь скинул {media_type}, зрение не работает. Скажи что-нибудь едкое по факту того, что он скинул]",
+    logger.warning(
+        f"[зрение] все {tried} моделей из пула провалились, "
+        f"в блэклисте теперь {len(VISION_BLACKLIST)} моделей. Ответ на картинку не отправлен."
     )
+    return ""
 
 
 # --- КОМАНДЫ ---
@@ -422,7 +480,8 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• папочка: {MASTER_USERNAME}\n"
         f"• текстовых моделей: {len(TEXT_POOL)}\n"
         f"• зрячих моделей: {len(VISION_POOL)}\n"
-        f"• активное зрение: {PRIMARY_VISION_MODEL}"
+        f"• заблэклистено как 'не зрячих': {len(VISION_BLACKLIST)}\n"
+        f"• активное зрение: {VISION_POOL[0] if VISION_POOL else '(нет)'}"
     )
     await update.message.reply_text(status)
 
@@ -430,8 +489,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-    chat_id = update.effective_chat.id
-    reset_history(chat_id)
+    reset_history(update.effective_chat.id)
     await update.message.reply_text("память по этому чату очищена")
 
 
@@ -468,7 +526,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"-> reply={should_reply} text='{text[:40]}'"
     )
 
-    # Если не отвечаем — просто записываем в память для контекста
     if not should_reply:
         with _get_lock(chat_id):
             hist = get_history(chat_id)
@@ -561,13 +618,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- СТАРТ ---
 def print_startup_status() -> None:
+    vision_line = VISION_POOL[0] if VISION_POOL else "(нет ни одной)"
     logger.info(
         "\n"
         "┌──────────────────────────────────────────────────────────┐\n"
         "│                   ЗАПУСК ВАЛЕРЫ                          │\n"
         "├────────────────────┬─────────────────────────────────────┤\n"
         f"│ Основной текст     │ {PRIMARY_TEXT_MODEL:<35} │\n"
-        f"│ Основное зрение    │ {PRIMARY_VISION_MODEL:<35} │\n"
+        f"│ Основное зрение    │ {vision_line:<35} │\n"
         f"│ Текстовый пул      │ {len(TEXT_POOL):<35} │\n"
         f"│ Зрячий пул         │ {len(VISION_POOL):<35} │\n"
         "└────────────────────┴─────────────────────────────────────┘"
