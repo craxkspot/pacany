@@ -155,14 +155,13 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- УМНЫЙ ГЕНЕРАТОР ТЕКСТА С ТЕГАМИ И ПОИСКОМ ---
+# --- УМНЫЙ ГЕНЕРАТОР ТЕКСТА ---
 async def generate_text_roast(chat_id: int, sender_username: str, user_text: str) -> str:
     if not groq_client:
         return "ну ты и высер конечно"
 
     is_master = (sender_username == MASTER_USERNAME)
 
-    # Проверяем, нужен ли веб-поиск фактов
     search_keywords = ["кто такой", "что такое", "когда", "где", "найди", "погугли", "курс", "цена", "почему", "сколько"]
     search_data = ""
     if any(kw in user_text.lower() for kw in search_keywords):
@@ -177,7 +176,8 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
         "3. УМЕЙ ТЕГАТЬ УЧАСТНИКОВ: Используй юзернеймы участников из истории сообщений (формат @username), когда обращаешься к ним или когда тебя просят пообщаться с кем-то конкретным.\n"
         "4. Если к тебе обращаются по делу или просят найти информацию — используй факты из интернета (они будут даны ниже).\n"
         "5. Пиши ВСЕГДА с маленькой буквы и без точек в конце, без шизофрении.\n"
-        "6. Говори строго от первого лица ('я')."
+        "6. Говори строго от первого лица ('я').\n"
+        "7. СТРОГИЙ ЗАПРЕТ: Никогда не используй слово 'чож' или 'чо'! Забудь его навсегда."
     )
 
     if search_data:
@@ -198,6 +198,8 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
             reply = reply[:-1]
         reply = reply.lower() if reply else "ну и кринж"
         
+        reply = reply.replace("чож", "").replace("чо ", "че ").strip()
+
         chat_histories[chat_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
@@ -212,22 +214,36 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         is_master = (sender_username == MASTER_USERNAME)
         
-        prompt_prefix = f"Ты Валера. Хозяин @{MASTER_USERNAME} скинул медиа, подколи его." if is_master else "Обоссы эту пикчу едко и по делу."
-        system_prompt = f"{prompt_prefix} Пиши с маленькой буквы, без точек, от первого лица."
+        prompt_prefix = f"Ты Валера. Хозяин @{MASTER_USERNAME} скинул медиа, подколи его. Опиши то, что видишь на картинке/стикере, и постебись." if is_master else "Обоссы эту пикчу или стикер едко и по делу, опираясь на то, что на ней изображено."
+        system_prompt = f"{prompt_prefix} Пиши с маленькой буквы, без точек, от первого лица. Запрещено использовать слово 'чож' или 'чо'."
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(list(chat_histories[chat_id]))
 
+        # Добавляем мультимодальный запрос в Vision-модель
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": caption if caption else "проанализируй это изображение/стикер и прокомментируй его едко"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                }
+            ]
+        })
+
         response = groq_client.chat.completions.create(
             model=VISION_MODEL,
             messages=messages,
-            max_tokens=100,
+            max_tokens=120,
             temperature=0.7
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
         if reply.endswith("."):
             reply = reply[:-1]
         reply = reply.lower() if reply else "что за кал"
+        reply = reply.replace("чож", "").replace("чо ", "че ").strip()
+
         chat_histories[chat_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
@@ -305,20 +321,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_master = (username == MASTER_USERNAME)
     text = update.message.text or update.message.caption or ""
 
-    # Записываем сообщение с юзернеймом в контекст чата, чтобы бот видел, кого можно тегать
     user_tag_str = f"@{username}" if username else user.first_name
-    chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag_str}]: {text}" if text else f"[{user_tag_str} скинул медиа]"})
+    chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag_str}]: {text}" if text else f"[{user_tag_str} скинул медиа/стикер]"})
 
     is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
     is_addressed_to_bot = any(word in text.lower() for word in ["валер", "бот валера", "валера,", "валера!"])
 
-    # Фильтр от ложных срабатываний на реального Валеру в конфе
     if "валер" in text.lower() and not is_addressed_to_bot and not is_reply_to_bot and not is_master:
         if random.random() > 0.15:
-            logger.info("🤖 Похоже, зовут реального Валеру, бот молчит.")
             return
 
-    should_reply = is_addressed_to_bot or is_reply_to_bot or (random.random() < 0.40)
+    has_media = bool(update.message.photo or update.message.sticker or update.message.video_note)
+    should_reply = is_addressed_to_bot or is_reply_to_bot or has_media or (random.random() < 0.40)
 
     if not should_reply:
         if random.random() < 0.03:
@@ -338,6 +352,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка фото: {e}")
             roast_text = "пикча битая"
+    elif update.message.sticker:
+        try:
+            sticker_file = await update.message.sticker.get_file()
+            sticker_bytes = await sticker_file.download_as_bytearray()
+            roast_text = await generate_image_roast(chat_id, username, bytes(sticker_bytes), "стикер")
+        except Exception as e:
+            logger.error(f"Ошибка стикера: {e}")
+            roast_text = "что за убогий стикер"
     elif update.message.video_note:
         try:
             video_file = await update.message.video_note.get_file()
