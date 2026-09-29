@@ -35,7 +35,7 @@ groq_client = OpenAI(
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 # НАША МОДЕЛЬ QWEN
-TEXT_MODEL = "qwen-2.5-32b"  # Рабочий идентификатор Qwen в Groq (если у тебя qwen/qwen3.8-27b, укажи его)
+TEXT_MODEL = "deepseek-r1-distill-qwen-32b"
 VISION_MODEL = "llama-3.2-11b-vision-preview"
 
 CACHE_FILE = "user_cache.json"
