@@ -145,7 +145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
         ]
 
-    # Безопасное формирование истории без вложенных списков
+    # Формирование сообщения для истории
     if image_url:
         msg_content = f"{user_name} прислал картинку. Текст: {user_text}" if user_text else f"{user_name} прислал картинку."
     else:
@@ -153,10 +153,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_histories[chat_id].append({"role": "user", "content": msg_content})
     
-    # Контроль длины истории
-    history = chat_histories[chat_id]
-    if len(history) > 14:
-        chat_histories[chat_id] = [history[0]] + history[-13:]
+    # Безопасное ограничение длины истории
+    if len(chat_histories[chat_id]) > 14:
+        system_prompt = chat_histories[chat_id][0]
+        recent_msgs = chat_histories[chat_id][-13:]
+        chat_histories[chat_id] = [system_prompt] + recent_msgs
 
     is_reply_to_bot = (
         update.message.reply_to_message 
