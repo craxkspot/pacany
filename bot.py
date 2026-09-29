@@ -6,7 +6,7 @@ import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 from openai import OpenAI
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
@@ -40,9 +40,7 @@ def get_active_models() -> tuple[str, str]:
     try:
         models_data = groq_client.models.list().data
         available_ids = [m.id for m in models_data]
-        logger.info(f"Доступно моделей в Groq API: {len(available_ids)}")
 
-        # Белый список самых надёжных диалоговых моделей Groq в порядке приоритета
         priority_text = [
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
@@ -52,15 +50,13 @@ def get_active_models() -> tuple[str, str]:
             "gemma2-9b-it"
         ]
 
-        # Черный список для отсечения тестовых/служебных моделей
         banned_keywords = ["openai", "gpt-oss", "whisper", "vision", "guard", "embed", "safetensors"]
 
         selected_text = None
         
-        # 1. Сначала ищем по нашему проверенному списку
+        # 1. Проверяем приоритетные разговорные модели
         for model in priority_text:
             if model in available_ids:
-                # Проверяем, отдаёт ли модель реальный текст
                 try:
                     res = groq_client.chat.completions.create(
                         model=model,
@@ -74,7 +70,7 @@ def get_active_models() -> tuple[str, str]:
                 except Exception:
                     continue
 
-        # 2. Если ничего из приоритетного не подошло, ищем любую подходящую чат-модель
+        # 2. Поиск любой работающей альтернативы
         if not selected_text:
             for m in available_ids:
                 if not any(bad in m.lower() for bad in banned_keywords):
@@ -94,7 +90,7 @@ def get_active_models() -> tuple[str, str]:
         if not selected_text:
             selected_text = fallback_text
 
-        # 3. Отбираем рабочую Vision-модель для распознавания картинок
+        # 3. Подбор Vision-модели
         priority_vision = [
             "llama-3.2-11b-vision-preview",
             "llama-3.2-90b-vision-preview"
@@ -131,7 +127,7 @@ VALERA_IMPERSONATIONS = [
 ]
 
 
-# --- ВЕБ-СЕРВЕР ДЛЯ ХЕЛСЧЕКОВ (RENDER / KOYEB) ---
+# --- ВЕБ-СЕРВЕР ДЛЯ ХЕЛСЧЕКОВ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -242,6 +238,20 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
         return "Валера, даже нейросеть с глазами в шоке от твоей картинки."
 
 
+# --- ЕДИНСТВЕННАЯ КОМАНДА /ping ---
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        status_msg = (
+            "🤖 **Валера-Бот на связи!**\n\n"
+            f"• Статус ИИ: ✅ Работает\n"
+            f"• Текст: `{TEXT_MODEL}`\n"
+            f"• Фото: `{VISION_MODEL}`\n"
+            f"• ГС: `{AUDIO_MODEL}`\n"
+            f"• Жертва: @{TARGET_USERNAME}"
+        )
+        await update.message.reply_text(status_msg, parse_mode="Markdown")
+
+
 # --- ТАБЛИЦА СТАТУСА ПРИ СТАРТЕ ---
 def print_startup_status_table() -> bool:
     tg_ok = "✅ ОК" if TELEGRAM_TOKEN else "❌ ОТСУТСТВУЕТ"
@@ -255,8 +265,8 @@ def print_startup_status_table() -> bool:
         try:
             res = groq_client.chat.completions.create(
                 model=TEXT_MODEL,
-                messages=[{"role": "user", "content": "Скажи коротко: Все отлично"}],
-                max_tokens=10,
+                messages=[{"role": "user", "content": "Напиши ровно один символ: OK"}],
+                max_tokens=5,
                 temperature=0.1
             )
             test_response = res.choices[0].message.content.strip()
@@ -353,6 +363,10 @@ def main():
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
+    # Только одна команда для проверки живой ли бот
+    application.add_handler(CommandHandler("ping", ping_command))
+    
+    # Обработчик обычных сообщений
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
     logger.info("🤖 Бот запущен, слушает чат...")
