@@ -1,4 +1,5 @@
 python-telegram-bot
 openai
 httpx
-duckduckgo-search
+tavily-python
+python-doten
