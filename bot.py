@@ -38,9 +38,9 @@ client = OpenAI(
 chat_histories = defaultdict(lambda: deque(maxlen=50))
 
 
-# --- АВТОМАТИЧЕСКИЙ СБОР ПУЛОВ МОДЕЛЕЙ (ТЕКСТ + ЗРЕНИЕ) ---
+# --- АВТОМАТИЧЕСКИЙ СБОР И СОРТИРОВКА ПУЛОВ МОДЕЛЕЙ ---
 def get_model_pools() -> tuple[list[str], list[str]]:
-    """Динамически разделяет бесплатные модели на текстовые и зрячие (Vision)"""
+    """Динамически находит и разделяет бесплатные модели на текстовые и зрячие"""
     default_text = [
         "meta-llama/llama-3.1-8b-instruct:free",
         "google/gemma-2-9b-it:free",
@@ -48,16 +48,16 @@ def get_model_pools() -> tuple[list[str], list[str]]:
         "deepseek/deepseek-chat:free"
     ]
     default_vision = [
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
         "qwen/qwen-2-vl-7b-instruct:free",
-        "google/gemini-2.0-flash-exp:free",
-        "meta-llama/llama-3.2-11b-vision-instruct:free"
+        "google/gemini-2.0-flash-exp:free"
     ]
 
     if not client:
         return default_text, default_vision
 
     try:
-        logger.info("🔍 Сканируем доступные модели с OpenRouter...")
+        logger.info("🔍 Сканируем актуальные бесплатные модели с OpenRouter...")
         models_response = client.models.list()
         
         available_ids = []
@@ -67,28 +67,28 @@ def get_model_pools() -> tuple[list[str], list[str]]:
             elif isinstance(m, dict) and "id" in m:
                 available_ids.append(str(m["id"]))
 
+        # Фильтруем только бесплатные без мусора
         free_models = [
             m_id for m_id in available_ids 
             if ":free" in m_id.lower() 
             and not any(w in m_id.lower() for w in ["embed", "tts", "audio", "guard"])
         ]
 
-        # Ищем модели со зрение (содержат vision, vl, pixtral, qwen-2-vl и т.д.)
-        vision_models = [
-            m for m in free_models 
-            if any(k in m.lower() for k in ["vision", "vl", "pixtral", "gemini-2.0-flash"])
-        ]
+        # Ищем модели, поддерживающие картинки (Vision / VL / Flash)
+        vision_keywords = ["vision", "vl", "pixtral", "gemini", "flash", "multimodal"]
+        vision_models = [m for m in free_models if any(k in m.lower() for k in vision_keywords)]
         
-        # Текстовые модели (всё остальное бесплатное)
+        # Всё остальное уходит в текстовые модели
         text_models = [m for m in free_models if m not in vision_models]
 
+        # Если что-то не нашлось, подмешиваем дефолты
         if not vision_models:
             vision_models = default_vision
         if not text_models:
             text_models = default_text
 
-        logger.info(f"✅ Найдено текстовых моделей: {len(text_models)}, зрячих (Vision): {len(vision_models)}")
-        return text_models[:10], vision_models[:10]
+        logger.info(f"✅ Найдено текстовых моделей: {len(text_models)}, зрячих: {len(vision_models)}")
+        return text_models[:15], vision_models[:15]
 
     except Exception as e:
         logger.error(f"❌ Ошибка автоподбора пулов моделей: {e}")
@@ -97,7 +97,7 @@ def get_model_pools() -> tuple[list[str], list[str]]:
 # Инициализируем пулы
 TEXT_POOL, VISION_POOL = get_model_pools()
 PRIMARY_TEXT_MODEL = TEXT_POOL[0] if TEXT_POOL else "meta-llama/llama-3.1-8b-instruct:free"
-PRIMARY_VISION_MODEL = VISION_POOL[0] if VISION_POOL else "qwen/qwen-2-vl-7b-instruct:free"
+PRIMARY_VISION_MODEL = VISION_POOL[0] if VISION_POOL else "meta-llama/llama-3.2-11b-vision-instruct:free"
 
 
 # --- ПОИСК В ИНТЕРНЕТЕ ---
@@ -159,11 +159,12 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
     if any(kw in user_text.lower() for kw in search_keywords):
         search_data = search_web(user_text)
 
+    # Убрали зацикленность на «чож» из промпта
     system_prompt = (
         f"Ты — Валера, живой, токсичный и едкий тип из конфы. Твой создатель — {MASTER_USERNAME}. "
         "Внимательно анализируй контекст разговора, историю беседы и то, что скидывают пользователи. "
         "Отвечай осмысленно, опираясь на реальную ситуацию и диалог, не неси рандомный бред. "
-        "Можешь использовать слова вроде 'чо' или 'чож', если это уместно, и изредка тегать участников беседы, если ситуация располагает, но делай это естественно. "
+        "Можешь использовать сленг, если это уместно, и изредка тегать участников беседы, но делай это естественно. "
         "С создателем ({MASTER_USERNAME}) общайся с особым пристрастием и едкими подколами, признавая его авторитет. "
         "Остальных участников жестко стеби, души за глупости и ставь на место по фактам из переписки. "
         "Пиши естественно, с маленькой буквы."
@@ -205,7 +206,7 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
     return "у меня словесный понос, все бесплатные текстовые апишки легли"
 
 
-# --- ОБРАБОТЧИК КАРТИНОК И СТИКЕРОВ (ЧЕРЕЗ VISION-ПУЛ) ---
+# --- ОБРАБОТЧИК КАРТИНОК И СТИКЕРОВ ---
 async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: bytes, caption: str, media_type: str) -> str:
     try:
         image = Image.open(io.BytesIO(image_bytes))
@@ -234,7 +235,7 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
             ]
         })
 
-        # Перебираем именно ЗРЯЧИЕ модели (Vision Pool)
+        # Перебираем зрячие модели из динамического пула зрения
         for model_name in VISION_POOL:
             try:
                 logger.info(f"👁️ [Зрение] Пробуем зрячую модель: {model_name}")
@@ -247,7 +248,7 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
                     reply = reply.replace("*", "").strip().lower()
                     if reply.endswith("."):
                         reply = reply[:-1]
-                    chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag} скинул {media_type}] {caption}"})
+                    chat_histories[chat_id].append({"role": "user", "content": f"[{sender_username} скинул {media_type}] {caption}"})
                     chat_histories[chat_id].append({"role": "assistant", "content": reply})
                     logger.info(f"✅ [Зрение] Успешно обработано моделью: {model_name}")
                     return reply
@@ -265,11 +266,11 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
-            "🤖 **Валера (Vision & Text Pools) на связи!**\n\n"
+            "🤖 **Валера (Auto-Vision Pools) на связи!**\n\n"
             f"• Папочка: `{MASTER_USERNAME}` ✅\n"
-            f"• Текстовых моделей в ротации: `{len(TEXT_POOL)}`\n"
-            f"• Зрячих (Vision) моделей в ротации: `{len(VISION_POOL)}`\n"
-            f"• Основное зрение: `{PRIMARY_VISION_MODEL}`"
+            f"• Текстовых моделей: `{len(TEXT_POOL)}`\n"
+            f"• Зрячих моделей: `{len(VISION_POOL)}`\n"
+            f"• Активное зрение: `{PRIMARY_VISION_MODEL}`"
         )
         await update.message.reply_text(status_msg, parse_mode="Markdown")
 
@@ -277,7 +278,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def print_startup_status_table() -> bool:
     table_log = f"""
 ┌────────────────────────────────────────────────────────────────────────┐
-│         ОТЧЕТ О ЗАПУСКЕ ВАЛЕРЫ (РАЗДЕЛЬНЫЕ ПУЛЫ МОДЕЛЕЙ)               │
+│         ОТЧЕТ О ЗАПУСКЕ ВАЛЕРЫ (АВТОМАТИЧЕСКИЕ ПУЛЫ)                   │
 ├──────────────────────┬─────────────────────────────────────────────────┤
 │ Основной текст       │ {PRIMARY_TEXT_MODEL:<47} │
 │ Основное зрение      │ {PRIMARY_VISION_MODEL:<47} │
@@ -324,13 +325,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if update.message.photo:
-            logger.info("📸 Обрабатываем фото через зрячий пул...")
+            logger.info("📸 Обрабатываем фото через динамический пул зрения...")
             f = await update.message.photo[-1].get_file()
             b = await f.download_as_bytearray()
             roast_text = await generate_image_roast(chat_id, username, bytes(b), text, "фото")
             
         elif update.message.sticker:
-            logger.info("🖼️ Обрабатываем стикер через зрячий пул...")
+            logger.info("🖼️ Обрабатываем стикер через пул зрения...")
             if update.message.sticker.is_animated or update.message.sticker.is_video:
                 roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул анимированный стикер. Обосри его за эти картинки]")
             else:
@@ -371,7 +372,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Валера со зрением запущен!")
+    logger.info("🤖 Валера с автопоиском зрения запущен!")
     application.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 
