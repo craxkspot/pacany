@@ -5,6 +5,7 @@ import logging
 import io
 import re
 import base64
+import time
 import urllib.parse
 import httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -25,27 +26,21 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 
-# Основной клиент (текст, vision, промпты)
 groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 )
 
-# Клиент поиска
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
-# Конфигурация моделей
 TEXT_MODEL = "qwen/qwen3.8-27b"
-VISION_MODEL = "llama-3.2-11b-vision-preview"  # Бесплатная vision-модель на Groq
+VISION_MODEL = "llama-3.2-11b-vision-preview"
 
-# Имена файлов для памяти
 CACHE_FILE = "user_cache.json"
-
-# Оперативная память диалогов
 chat_histories = {}
+last_bot_message_time = {}  # Для отслеживания ответов вдогонку
 
 
-# --- ХОЛБЕК-СЕРВЕР ДЛЯ RENDER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -66,7 +61,7 @@ def run_web_server():
     server.serve_forever()
 
 
-# --- ДОЛГОВРЕМЕННАЯ ПАМЯТЬ НА JSON ---
+# --- ДОЛГОВРЕМЕННАЯ ПАМЯТЬ (JSON) ---
 def load_cache():
     if os.path.exists(CACHE_FILE):
         try:
@@ -85,22 +80,20 @@ def save_cache(cache):
         logger.error(f"Ошибка записи кэша JSON: {e}")
 
 
-# При старте загружаем базу
 user_cache = load_cache()
 
 
 def get_user_full_name(user):
-    """Сборка полного имени и запоминание в JSON"""
-    if not user: return "Пользователь"
-    
+    if not user:
+        return "Пользователь"
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     username = f" (@{user.username})" if user.username else ""
     full_name = f"{first_name} {last_name}{username}".strip()
-    if not full_name: full_name = "Аноним"
+    if not full_name:
+        full_name = "Аноним"
 
     user_id = str(user.id)
-    # Если пользователя нет в базе — записываем
     if user_id not in user_cache["users"]:
         user_cache["users"][user_id] = {
             "name": full_name,
@@ -108,25 +101,40 @@ def get_user_full_name(user):
             "last_interaction": ""
         }
         save_cache(user_cache)
-        logger.info(f"Запомнил нового пользователя: {full_name} (ID: {user_id})")
-        
     return full_name
 
 
-def update_facts_in_cache(user_id, factual_data):
-    """Обновление фактов о пользователе (для долговременной памяти)"""
-    if user_id in user_cache["users"]:
-        # Здесь можно добавить логику парсинга фактов, пока просто лог
-        logger.info(f"Обновление данных для {user_id}: {factual_data}")
-        pass
+async def extract_and_verify_fact(text: str, author_name: str) -> str | None:
+    """ИИ-фильтр: отделяет шутки, сарказм и бред от реальных фактов о пользователях"""
+    prompt = (
+        f"Автор сообщения '{author_name}' написал: \"{text}\".\n"
+        "Содержит ли этот текст РЕАЛЬНЫЙ, конкретный факт о ком-то из людей (например: профессия, возраст, хобби, домашние животные, реальные события из жизни)?\n"
+        "ПРАВИЛА:\n"
+        "1. Игнорируй шутки, сарказм, метафоры (вроде 'съел слона'), оскорбления в шутливой форме, мемы и очевидный бред.\n"
+        "2. Если это шутка или пустые слова, ответь строго одним словом: NO.\n"
+        "3. Если это реальный факт, сформулируй его коротко на русском языке (например: 'Работает программистом', 'Купил новую видеокарту'). Выдай ТОЛЬКО этот факт без лишних слов."
+    )
+    try:
+        response = groq_client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=50,
+            temperature=0.1
+        )
+        result = response.choices[0].message.content.strip()
+        if "NO" in result or len(result) < 3:
+            return None
+        return result
+    except Exception as e:
+        logger.error(f"Ошибка фильтра фактов: {e}")
+        return None
 
 
-# --- БЕСПЛАТНАЯ ГЕНЕРАЦИЯ КАРТИНКИ С FALLBACK ---
+# --- ГЕНЕРАЦИЯ КАРТИНОК С FALLBACK ---
 async def generate_image(prompt: str) -> bytes | None:
     encoded_prompt = urllib.parse.quote(prompt)
     seed = random.randint(1, 1000000)
     
-    # Резервная цепочка моделей
     urls = [
         f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=flux",
         f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=turbo",
@@ -136,19 +144,18 @@ async def generate_image(prompt: str) -> bytes | None:
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         for url in urls:
             try:
-                # Быстро пробуем: если сервер перегружен, у него короткий таймаут на Flux
                 response = await client.get(url, timeout=12.0)
                 if response.status_code == 200 and len(response.content) > 10000:
                     return response.content
             except Exception:
-                logger.warning(f"Таймаут или ошибка {url.split('model=')[-1]}, переключаемся...")
+                logger.warning(f"Таймаут или ошибка генерации, переключаем модель...")
     return None
 
 
-# --- СТАБИЛЬНЫЙ ПОИСК ЧЕРЕЗ TAVILY ---
+# --- ПОИСК TAVILY ---
 def search_web_tavily(query: str) -> str:
-    """Очистка и поиск через Tavily"""
-    if not tavily_client: return ""
+    if not tavily_client:
+        return ""
     
     clean_query = re.sub(
         r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найти|загугли|гугл|найди)\b', 
@@ -156,7 +163,8 @@ def search_web_tavily(query: str) -> str:
         query
     ).strip()
     
-    if not clean_query: clean_query = query
+    if not clean_query:
+        clean_query = query
 
     try:
         response = tavily_client.search(query=clean_query, search_depth="basic", max_results=3)
@@ -168,14 +176,15 @@ def search_web_tavily(query: str) -> str:
     return ""
 
 
-# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 def is_image_request(text: str) -> bool:
     keywords = ["нарисуй", "сделай картинку", "сгенерируй", "замути", "отрисуй", "покажи", "сделай фото"]
     return any(kw in text.lower() for kw in keywords)
 
 
+# --- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message: return
+    if not update.message:
+        return
 
     chat_id = update.effective_chat.id
     user_name = get_user_full_name(update.effective_user)
@@ -185,13 +194,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text or update.message.caption or ""
     lower_text = user_text.lower()
 
-    # Сразу обновляем время взаимодействия
+    # Обновляем таймстамп и проверяем факты через ИИ-фильтр
     if user_id_str in user_cache["users"]:
         user_cache["users"][user_id_str]["last_interaction"] = update.message.date.isoformat()
-        # Каждые 10 сообщений сохраняем кэш, чтобы не нагружать диск
-        if random.random() < 0.1: save_cache(user_cache)
+        
+        if user_text and len(user_text.split()) > 1:
+            verified_fact = await extract_and_verify_fact(user_text, user_name)
+            if verified_fact:
+                if verified_fact not in user_cache["users"][user_id_str]["facts"]:
+                    user_cache["users"][user_id_str]["facts"].append(verified_fact)
+                    save_cache(user_cache)
+                    logger.info(f"Записан факт о {user_name}: {verified_fact}")
 
-    # ОБРАБОТКА VISION (ЕСЛИ ЕСТЬ ФОТО)
+    # Обработка вложений (Vision)
     base64_image = None
     if update.message.photo:
         try:
@@ -201,9 +216,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка Vision: {e}")
 
-    if not user_text and not base64_image: return
+    if not user_text and not base64_image:
+        return
 
-    # ОБРАБОТКА ГЕНЕРАЦИИ КАРТИНОК
+    # Генерация картинок
     if is_image_request(lower_text):
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         
@@ -211,7 +227,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for kw in ["нарисуй", "сделай", "сгенерируй", "замути", "пантера", "фото", "картинку"]:
             prompt_for_image = prompt_for_image.replace(kw, "").strip()
             
-        if not prompt_for_image: prompt_for_image = user_text
+        if not prompt_for_image:
+            prompt_for_image = user_text
 
         try:
             enh_resp = groq_client.chat.completions.create(
@@ -221,7 +238,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "role": "system", 
                         "content": (
                             "You are an expert prompt engineer. Translate to a detailed English prompt. "
-                            "Handle Russian slang ORGANICALLY, do not misinterpret: 'пудж' = Pudge Dota 2, 'скуф' = unkempt middle aged man, 'альтушка' = alt girl. "
+                            "Handle Russian slang ORGANICALLY: 'пудж' = Pudge Dota 2, 'скуф' = unkempt middle aged man, 'альтушка' = alt girl. "
                             "Output ONLY the English prompt."
                         )
                     },
@@ -243,7 +260,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать, сервер перегружен.")
             return
 
-    # ОБРАБОТКА ИСТОРИИ И ПАМЯТИ
+    # Инициализация оперативной истории
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
@@ -251,14 +268,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "content": (
                     "Ты — адекватный, живой ИИ-собеседник. Ты подстраиваешься под вайб чата. "
                     "ПРАВИЛА:\n"
-                    "1. Используй имена пользователей, которые переданы тебе в JSON контексте.\n"
-                    "2. Если поиск не дал результатов, честно скажи, что не знаешь.\n"
+                    "1. Используй факты о пользователях из переданного JSON контекста, если они уместны.\n"
+                    "2. Не придумывай лишней конспирологии, понимай сленг (например 'ЗБС' — это сокращение от 'заебись' / круто).\n"
                     "3. Пиши ТОЛЬКО обычным плоским текстом без звездочек и Markdown."
                 )
             }
         ]
 
-    # Сохраняем в историю (для контекста разговора)
     msg_content = f"{user_name}: {user_text}" if user_text else f"{user_name}: [ПРИСЛАЛ ФОТО]"
     chat_histories[chat_id].append({"role": "user", "content": msg_content})
     
@@ -267,29 +283,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recent_msgs = chat_histories[chat_id][-13:]
         chat_histories[chat_id] = [system_prompt] + recent_msgs
 
-    # Логика ответов
+    # Условия активации бота в группе
     is_reply_to_bot = (
         update.message.reply_to_message 
         and update.message.reply_to_message.from_user.id == context.bot.id
     )
     is_mentioned = "пантера" in lower_text or base64_image is not None
     
-    if chat_type != "private" and not is_reply_to_bot and not is_mentioned and random.random() < 0.88:
+    # Бот реагирует, если прошло меньше 30 секунд после его собственного ответа (диалог вдогонку)
+    recent_bot_activity = (chat_id in last_bot_message_time) and (time.time() - last_bot_message_time[chat_id] < 30)
+
+    if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not recent_bot_activity and random.random() < 0.88:
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Сборка контекста из долговременной памяти (для отправки в Groq)
+    # Сборка долговременной памяти (фактов о пользователе)
     known_users_context = []
-    # Берем только тех, кто реально пишет в этом чате (чтобы промпт не раздулся)
-    # Здесь упрощенно: отправляем инфу о текущем пользователе
-    known_users_context.append({
-        "name": user_name,
-        "dota_user_name": user_name,
-        "full_telegram_identity": user_cache["users"][user_id_str]["name"]
-    })
+    if user_id_str in user_cache["users"]:
+        u_data = user_cache["users"][user_id_str]
+        known_users_context.append({
+            "name": u_data["name"],
+            "real_facts": u_data["facts"]
+        })
 
-    # СТАБИЛЬНЫЙ ПОИСК TAVILY (ТОЛЬКО ЕСЛИ НЕТ КАРТИНКИ)
+    # Поиск информации, если нужен
     search_context = ""
     if not base64_image:
         needs_search_keywords = ["кто", "что", "знаешь", "найди", "загугли", "гугл", "инфа", "расскажи про"]
@@ -298,19 +316,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if should_search:
             search_context = search_web_tavily(user_text)
 
-    # Собираем финальные сообщения для Groq
     messages_to_send = list(chat_histories[chat_id])
-    # Внедряем JSON-память и поиск в системный промпт
     messages_to_send[0] = {
         "role": "system",
         "content": (
             chat_histories[chat_id][0]["content"] +
-            f"\n[КЭШ ИЗВЕСТНЫХ ПОЛЬЗОВАТЕЛЕЙ]: {json.dumps(known_users_context, ensure_ascii=False)}\n" +
+            f"\n[ДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ]: {json.dumps(known_users_context, ensure_ascii=False)}\n" +
             (f"\n[ДАННЫЕ ИЗ ПОИСКА]: {search_context}" if search_context else "")
         )
     }
 
-    # Переключение на Vision, если есть картинка
     active_model = TEXT_MODEL
     if base64_image:
         active_model = VISION_MODEL
@@ -326,7 +341,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         }
 
-    # ГЕНЕРАЦИЯ ФИНАЛЬНОГО ОТВЕТА
     try:
         response = groq_client.chat.completions.create(
             model=active_model,
@@ -337,7 +351,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = response.choices[0].message.content
         
         if reply_text:
-            # Очистка от Markdown-звездочек
             reply_text = reply_text.replace("*", "")
             chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
         else:
@@ -347,22 +360,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = "Сервер временно недоступен."
 
     try:
-        await update.message.reply_text(reply_text)
+        sent_msg = await update.message.reply_text(reply_text)
+        # Фиксируем время ответа бота для распознавания сообщений вдогонку
+        last_bot_message_time[chat_id] = time.time()
     except Exception as e:
         logger.error(f"Ошибка отправки Telegram: {e}")
 
 
-# --- ЗАПУСК ---
 def main():
     if not TELEGRAM_TOKEN or not GROQ_API_KEY:
         logger.error("Токены не заданы! Проверь переменные окружения.")
         return
 
-    # Запуск веб-сервера (для хостинга)
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    # Запуск Telegram Бота
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     application.run_polling()
