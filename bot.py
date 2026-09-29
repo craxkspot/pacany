@@ -97,7 +97,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text and not image_url:
         return
 
-    # Проверка: если это явный запрос на картинку
+    # Обработка команд генерации картинок
     image_triggers = ["нарисуй", "сделай картинку", "сгенерируй", "создай изображение"]
     if any(kw in lower_text for kw in image_triggers):
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
@@ -131,34 +131,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать картинку.")
             return
 
-    # Инициализация истории чата
+    # ЖИВОЙ СИСТЕМНЫЙ ПРОМПТ (возвращаем свободу мысли и стиль общения)
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ты обычный участник текстового чата. Общайся на равных, без искусственной роботоподобности, "
-                    "без занудства и без фальшивой вежливости. Пиши просто, как люди в чатах. "
-                    "НИКОГДА не используй символы разметки вроде звездочек (** или *) для выделения текста — пиши обычным плоским текстом. "
-                    "Если тебе дают свежие данные из интернета, опирайся на них."
+                    "Ты — крутой, расслабленный собеседник и товарищ по чату. Общайся естественно, живо, поддерживай беседу с интересом, "
+                    "улавливай вайб, подмечай детали и рассуждай так, как общался бы умный живой человек. "
+                    "Не скатывайся в роботоподобные отчеты и сухие ответы. Разрешено ирония, размышления вслух, ассоциации и свой стиль. "
+                    "НИКОГДА не используй символы разметки вроде звездочек (** или *) для выделения текста — пиши обычным плоским текстом."
                 )
             }
         ]
 
-    # Безопасное формирование контента сообщения
+    # Формируем контент для истории
     if image_url:
-        caption_text = f"{user_name}: {user_text}" if user_text else f"{user_name} прислал картинку."
-        user_content = [
-            {"type": "text", "text": caption_text},
-            {"type": "image_url", "image_url": {"url": image_url}}
-        ]
+        msg_content = f"{user_name} прислал картинку. Текст: {user_text}" if user_text else f"{user_name} прислал картинку."
     else:
-        user_content = f"{user_name}: {user_text}"
+        msg_content = f"{user_name}: {user_text}"
 
-    chat_histories[chat_id].append({"role": "user", "content": user_content})
+    chat_histories[chat_id].append({"role": "user", "content": msg_content})
     
-    if len(chat_histories[chat_id]) > 12:
-        chat_histories[chat_id] = [chat_histories[chat_id][0]] + chat_histories[chat_id][-11:]
+    # Нормальная длина памяти, чтобы диалог не обрывался на полуслове
+    if len(chat_histories[chat_id]) > 14:
+        chat_histories[chat_id] = [chat_histories[chat_id][0]] + chat_histories[chat_id][-13:]
 
     is_reply_to_bot = (
         update.message.reply_to_message 
@@ -192,12 +189,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+    # Возвращаем адекватную температуру (0.75), чтобы у текста появился характер, глубина и стиль
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=chat_histories[chat_id],
-            max_tokens=500,
-            temperature=0.8,
+            max_tokens=400,
+            temperature=0.75, 
         )
         reply_text = response.choices[0].message.content
         
