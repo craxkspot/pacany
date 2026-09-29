@@ -54,11 +54,13 @@ def search_web(query: str) -> str:
         resp = requests.get(url, timeout=5)
         data = resp.json()
         abstract = data.get("AbstractText")
-        if abstract: return abstract
+        if abstract:
+            return abstract
         
         related = data.get("RelatedTopics", [])
         for topic in related:
-            if "Text" in topic: return topic["Text"]
+            if "Text" in topic:
+                return topic["Text"]
                 
         return "ничего конкретного в сети не нашлось"
     except Exception as e:
@@ -68,39 +70,50 @@ def search_web(query: str) -> str:
 
 # --- УМНЫЙ АВТОПОДБОР 3-Х МОДЕЛЕЙ (Текст, Зрение, Слух) ---
 def get_active_models() -> tuple[str, str, str]:
-    fallback_text = "llama-3.3-70b-versatile"
-    selected_text, selected_vision, selected_audio = fallback_text, None, None
+    selected_text, selected_vision, selected_audio = None, None, None
 
     if not groq_client:
-        return selected_text, selected_vision, selected_audio
+        return "openai/gpt-oss-120b", "qwen/qwen3.8-27b", "whisper-large-v3-turbo"
 
     try:
         models_data = groq_client.models.list().data
         available_ids = [m.id for m in models_data if "decommissioned" not in m.id.lower()]
         logger.info(f"Доступные модели на Groq: {available_ids}")
 
+        bad_words = ["whisper", "guard", "safeguard", "orpheus", "audio"]
+
         # 1. Текстовая модель
-        for pref in ["llama-3.3-70b", "llama-3.1-70b", "mixtral", "llama3"]:
-            found = [m for m in available_ids if pref in m.lower() and "vision" not in m.lower() and "whisper" not in m.lower()]
+        preferred_texts = ["gpt-oss-120b", "qwen3.8-27b", "llama", "qwen", "mixtral"]
+        for pref in preferred_texts:
+            found = [m for m in available_ids if pref in m.lower() and not any(bw in m.lower() for bw in bad_words) and "vision" not in m.lower()]
             if found:
                 selected_text = found[0]
                 break
         if not selected_text:
-            texts = [m for m in available_ids if "vision" not in m.lower() and "whisper" not in m.lower()]
-            if texts: selected_text = texts[0]
+            texts = [m for m in available_ids if not any(bw in m.lower() for bw in bad_words)]
+            if texts:
+                selected_text = texts[0]
 
-        # 2. Зрячая модель
-        visions = [m for m in available_ids if "vision" in m.lower()]
-        if visions: selected_vision = visions[0]
+        # 2. Зрячая модель (Qwen поддерживается как мультимодальная для зрения)
+        visions = [m for m in available_ids if "qwen" in m.lower() or "vision" in m.lower()]
+        if visions:
+            selected_vision = visions[0]
+        else:
+            selected_vision = selected_text
 
         # 3. Аудио модель
         audios = [m for m in available_ids if "whisper" in m.lower() or "audio" in m.lower()]
-        if audios: selected_audio = audios[0]
+        if audios:
+            selected_audio = audios[0]
 
     except Exception as e:
         logger.error(f"Ошибка автоподбора моделей: {e}")
 
-    return selected_text or fallback_text, selected_vision, selected_audio
+    return (
+        selected_text or "openai/gpt-oss-120b",
+        selected_vision or "qwen/qwen3.8-27b",
+        selected_audio or "whisper-large-v3-turbo"
+    )
 
 
 TEXT_MODEL, VISION_MODEL, AUDIO_MODEL = get_active_models()
@@ -112,7 +125,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Valera Bot Ultimate is live!")
-    def log_message(self, format, *args): return
+
+    def log_message(self, format, *args):
+        return
+
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -121,7 +137,8 @@ def run_web_server():
 
 # --- ГЕНЕРАТОР ТЕКСТА (БАЗА) ---
 async def generate_text_roast(chat_id: int, sender_username: str, user_text: str) -> str:
-    if not groq_client: return "мозги отключены, нет апи ключа"
+    if not groq_client:
+        return "мозги отключены, нет апи ключа"
 
     search_keywords = ["кто такой", "что такое", "когда", "где", "найди", "погугли", "курс", "цена", "почему", "сколько"]
     search_data = ""
@@ -151,7 +168,8 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
             model=TEXT_MODEL, messages=messages, max_tokens=200, temperature=0.75
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        if reply.endswith("."): reply = reply[:-1]
+        if reply.endswith("."):
+            reply = reply[:-1]
         reply = reply.lower().replace("чож", "").replace("чо ", "че ").strip()
 
         chat_histories[chat_id].append({"role": "user", "content": user_text})
@@ -188,7 +206,8 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
             model=VISION_MODEL, messages=messages, max_tokens=150, temperature=0.7
         )
         reply = response.choices[0].message.content.replace("*", "").strip().lower()
-        if reply.endswith("."): reply = reply[:-1]
+        if reply.endswith("."):
+            reply = reply[:-1]
         
         chat_histories[chat_id].append({"role": "user", "content": f"[скинул {media_type}] {caption}"})
         chat_histories[chat_id].append({"role": "assistant", "content": reply})
@@ -261,24 +280,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.message.from_user.username or update.message.from_user.first_name
     text = update.message.text or update.message.caption or ""
 
-    user_tag = username  # Без символа @, чтобы бот не учился спамить тегами
+    user_tag = username  # Без символа @, чтобы бот не уходил в спам тегов
 
     # 1. Проверяем, адресовано ли сообщение боту напрямую
     is_reply_to_bot = bool(update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id)
     is_addressed = any(word in text.lower() for word in ["валер", "валера", "валерон"])
     
     # 2. Рандомный шанс вклиниться в диалог (10%)
-    is_random_reply = random.random() < 0.60
+    is_random_reply = random.random() < 0.10
 
-    # 3. Итоговое решение: отвечать или нет?
+    # 3. Итоговое решение
     should_reply = is_addressed or is_reply_to_bot or is_random_reply
 
     if not should_reply:
-        # Просто запоминаем сообщение в историю для контекста
         if text: 
             chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag}]: {text}"})
         if not text and (update.message.photo or update.message.sticker or update.message.video or update.message.voice or update.message.video_note or update.message.animation):
-             chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag} отправил медиафайл]"})
+            chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag} отправил медиафайл]"})
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -334,6 +352,7 @@ def main():
     
     logger.info("🤖 Ультимативный Валера-бот 2.0 запущен!")
     application.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
