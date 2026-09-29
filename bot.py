@@ -29,7 +29,7 @@ groq_client = OpenAI(
 ) if GROQ_API_KEY else None
 
 
-# --- ДИНАМИЧЕСКИЙ АВТОПОДБОР ДОСТУПНЫХ МОДЕЛЕЙ GROQ ---
+# --- НАДЕЖНЫЙ ПОДБОР РАБОЧИХ МОДЕЛЕЙ GROQ ---
 def get_active_models() -> tuple[str, str]:
     fallback_text = "llama-3.3-70b-versatile"
     fallback_vision = "llama-3.2-11b-vision-preview"
@@ -40,43 +40,61 @@ def get_active_models() -> tuple[str, str]:
     try:
         models_data = groq_client.models.list().data
         available_ids = [m.id for m in models_data]
-        logger.info(f"Доступные модели Groq в вашем аккаунте: {available_ids}")
+        logger.info(f"Доступно моделей в Groq API: {len(available_ids)}")
 
-        # 1. Отбираем текстовые разговорные модели (включая Qwen и Llama)
-        chat_candidates = [
-            m for m in available_ids
-            if not any(bad in m.lower() for bad in ["whisper", "vision", "guard", "embed", "safetensors"])
-        ]
-
+        # Белый список самых надёжных диалоговых моделей Groq в порядке приоритета
         priority_text = [
             "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
             "qwen-2.5-32b",
             "qwen-2.5-72b",
-            "qwen2.5-72b-instruct",
-            "llama-3.1-70b-versatile",
             "llama3-8b-8192",
             "gemma2-9b-it"
         ]
 
+        # Черный список для отсечения тестовых/служебных моделей
+        banned_keywords = ["openai", "gpt-oss", "whisper", "vision", "guard", "embed", "safetensors"]
+
         selected_text = None
+        
+        # 1. Сначала ищем по нашему проверенному списку
         for model in priority_text:
             if model in available_ids:
-                selected_text = model
-                break
+                # Проверяем, отдаёт ли модель реальный текст
+                try:
+                    res = groq_client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": "OK"}],
+                        max_tokens=5,
+                        temperature=0.1
+                    )
+                    if res.choices[0].message.content.strip():
+                        selected_text = model
+                        break
+                except Exception:
+                    continue
 
-        if not selected_text and chat_candidates:
-            selected_text = chat_candidates[0]
-        elif not selected_text and available_ids:
-            selected_text = available_ids[0]
-        elif not selected_text:
+        # 2. Если ничего из приоритетного не подошло, ищем любую подходящую чат-модель
+        if not selected_text:
+            for m in available_ids:
+                if not any(bad in m.lower() for bad in banned_keywords):
+                    try:
+                        res = groq_client.chat.completions.create(
+                            model=m,
+                            messages=[{"role": "user", "content": "OK"}],
+                            max_tokens=5,
+                            temperature=0.1
+                        )
+                        if res.choices[0].message.content.strip():
+                            selected_text = m
+                            break
+                    except Exception:
+                        continue
+
+        if not selected_text:
             selected_text = fallback_text
 
-        # 2. Отбираем модели с поддержкой зрения (Vision API)
-        vision_candidates = [
-            m for m in available_ids
-            if "vision" in m.lower() and "guard" not in m.lower()
-        ]
-
+        # 3. Отбираем рабочую Vision-модель для распознавания картинок
         priority_vision = [
             "llama-3.2-11b-vision-preview",
             "llama-3.2-90b-vision-preview"
@@ -88,9 +106,7 @@ def get_active_models() -> tuple[str, str]:
                 selected_vision = model
                 break
 
-        if not selected_vision and vision_candidates:
-            selected_vision = vision_candidates[0]
-        elif not selected_vision:
+        if not selected_vision:
             selected_vision = fallback_vision
 
         return selected_text, selected_vision
@@ -239,8 +255,8 @@ def print_startup_status_table() -> bool:
         try:
             res = groq_client.chat.completions.create(
                 model=TEXT_MODEL,
-                messages=[{"role": "user", "content": "Напиши ровно один символ: OK"}],
-                max_tokens=5,
+                messages=[{"role": "user", "content": "Скажи коротко: Все отлично"}],
+                max_tokens=10,
                 temperature=0.1
             )
             test_response = res.choices[0].message.content.strip()
