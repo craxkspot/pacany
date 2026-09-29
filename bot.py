@@ -54,13 +54,15 @@ async def generate_image(prompt: str) -> bytes | None:
     """Генерация картинок через Pollinations"""
     encoded_prompt = urllib.parse.quote(prompt)
     seed = random.randint(1, 1000000)
-    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&nologo=true"
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}"
     
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         try:
             response = await client.get(image_url)
             if response.status_code == 200:
                 return response.content
+            else:
+                logger.error(f"Ошибка от сервера картинок: {response.status_code}")
         except Exception as e:
             logger.error(f"Ошибка генерации картинки: {e}")
     return None
@@ -102,7 +104,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(kw in lower_text for kw in image_triggers):
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         
-        # Вычищаем триггеры, слово "фото" и имя бота, чтобы они не ломали смысл картинки
         prompt_for_image = lower_text
         for kw in image_triggers + ["пантера", "pantera", "фото", "картинку"]:
             prompt_for_image = prompt_for_image.replace(kw, "").strip()
@@ -110,16 +111,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not prompt_for_image:
             prompt_for_image = user_text
 
+        # Промпт для бота-художника (учим его мемам)
         try:
             enh_resp = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are an expert prompt engineer for AI image generators. The user is asking a bot to draw something. Extract ONLY the core subject the user wants to see. Translate it into a highly detailed, cinematic English prompt for Midjourney. Output ONLY the English prompt. Do not output any conversational text."},
+                    {
+                        "role": "system", 
+                        "content": (
+                            "You are an expert prompt engineer for AI image generators. Translate the user's request into a highly detailed cinematic English prompt. "
+                            "CRITICAL: The user speaks in modern Russian internet slang, Twitch/TikTok memes, and gaming jargon (Dota 2, CS). "
+                            "Always interpret their words through the lens of Russian meme culture. "
+                            "Examples: 'пудж' = Pudge from Dota 2, 'скуф' = unkempt sloppy middle-aged russian man drinking beer, 'альтушка' = alt-girl, 'тюбик' = skinny weak guy, 'шлепа' = Big Floppa caracal cat, 'гигачад' = Gigachad meme. "
+                            "Output ONLY the English prompt. Do not output any conversational text."
+                        )
+                    },
                     {"role": "user", "content": prompt_for_image}
                 ],
                 max_tokens=150
             )
             detailed_prompt = enh_resp.choices[0].message.content.strip()
+            logger.info(f"Сгенерированный промпт для картинки: {detailed_prompt}")
         except Exception:
             detailed_prompt = prompt_for_image
 
@@ -133,21 +145,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать картинку, сервер не отвечает.")
             return
 
-    # Инициализация истории чата (Умный системный промпт с жесткими правилами)
+    # Системный промпт для текстового бота (прошивка на свойского чувака)
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ты — умный, живой и адекватный ИИ-собеседник. Общайся естественно, как эрудированный человек, "
-                    "подстраивайся под вайб чата. У тебя ЕСТЬ встроенный доступ к интернету. НИКОГДА не говори, что "
-                    "у тебя нет доступа к сети, что ты не можешь гуглить или что ты оффлайн-модель. Поиск работает. "
-                    "Пиши ТОЛЬКО обычным текстом. СТРОГО запрещено использовать Markdown-разметку (никаких звездочек)."
+                    "Ты — крутой, живой ИИ-собеседник. Ты глубоко шаришь за постиронию, современные мемы рунета, Твич, ТикТок и геймерский сленг (Дота, КС). "
+                    "Ты отлично понимаешь слова типа скуф, масик, тюбик, штрих, альтушка, дед инсайд, база, кринж, сигма, нормис и общаешься на одном языке с чатом. "
+                    "Веди себя естественно, как эрудированный свой чувак, подстраивайся под вайб. "
+                    "У тебя ЕСТЬ встроенный доступ к интернету. НИКОГДА не говори, что у тебя нет сети или ты чего-то не можешь загуглить. "
+                    "Пиши ТОЛЬКО обычным плоским текстом. СТРОГО запрещено использовать Markdown-разметку (никаких звездочек)."
                 )
             }
         ]
 
-    # Формирование сообщения для истории
     if image_url:
         msg_content = f"{user_name} прислал картинку. Текст: {user_text}" if user_text else f"{user_name} прислал картинку."
     else:
@@ -155,7 +167,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_histories[chat_id].append({"role": "user", "content": msg_content})
     
-    # Безопасное ограничение длины истории
     if len(chat_histories[chat_id]) > 14:
         system_prompt = chat_histories[chat_id][0]
         recent_msgs = chat_histories[chat_id][-13:]
@@ -173,7 +184,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Умная проверка на необходимость поиска
     try:
         check_resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -189,30 +199,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if search_result:
                 chat_histories[chat_id].append({
                     "role": "system", 
-                    "content": f"Вот информация из интернета (DuckDuckGo), используй её для ответа, не упоминай сам процесс поиска:\n{search_result}"
+                    "content": f"Вот информация из интернета (DuckDuckGo), используй её для ответа органично:\n{search_result}"
                 })
     except Exception as e:
         logger.error(f"Ошибка при попытке поиска: {e}")
 
-    # Генерация финального ответа
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=chat_histories[chat_id],
             max_tokens=400,
-            temperature=0.75,
+            temperature=0.8, # Чуть поднял температуру для большей живости и креатива в сленге
         )
         reply_text = response.choices[0].message.content
         
         if reply_text:
-            # ЖЕСТКАЯ ЗАЧИСТКА: физически вырезаем все звездочки из ответа перед отправкой
             reply_text = reply_text.replace("*", "")
             chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
         else:
-            reply_text = "Я тут, но что-то сбилось в мыслях."
+            reply_text = "Что-то процессор перегрелся, сорри."
     except Exception as e:
         logger.error(f"Ошибка Groq API: {e}")
-        reply_text = "Ошибка сети, не могу связаться с мозгом."
+        reply_text = "Мозг отвалился, я щас не на связи."
 
     try:
         await update.message.reply_text(reply_text)
@@ -225,11 +233,9 @@ def main():
         logger.error("Токены не заданы! Проверь переменные окружения.")
         return
 
-    # Запуск веб-сервера для Render
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
-    # Запуск бота
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     application.run_polling()
