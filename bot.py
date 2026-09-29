@@ -70,7 +70,7 @@ def search_web(query: str) -> str:
         return "интернет-поиск временно отрыгнул"
 
 
-# --- АВТОМАТИЧЕСКИЙ ПОИСК РАБОЧЕЙ МОДЕЛИ ИЗ ДОСТУПНЫХ ---
+# --- АВТОМАТИЧЕСКИЙ ПОИСК РАБОЧЕЙ МОДЕЛИ (С ФИЛЬТРОМ ОГРАНИЧЕНИЙ) ---
 def get_active_models() -> tuple[str, str, str]:
     selected_text, selected_vision, selected_audio = None, None, None
 
@@ -82,7 +82,8 @@ def get_active_models() -> tuple[str, str, str]:
         available_ids = [m.id for m in models_data if "decommissioned" not in m.id.lower()]
         logger.info(f"Доступные модели на Groq: {available_ids}")
 
-        bad_words = ["whisper", "guard", "safeguard", "audio", "embed", "tts"]
+        # Стоп-слова исключают служебные, аудио и модели с требованиями подтверждения условий (terms acceptance)
+        bad_words = ["whisper", "guard", "safeguard", "audio", "embed", "tts", "orpheus", "arabic", "saudi"]
 
         # Текстовая модель
         text_candidates = [m for m in available_ids if not any(bw in m.lower() for bw in bad_words) and "vision" not in m.lower()]
@@ -90,7 +91,7 @@ def get_active_models() -> tuple[str, str, str]:
             selected_text = text_candidates[0]
 
         # Модель со зрением
-        vision_candidates = [m for m in available_ids if "vision" in m.lower() or "qwen" in m.lower()]
+        vision_candidates = [m for m in available_ids if ("vision" in m.lower() or "qwen" in m.lower()) and not any(bw in m.lower() for bw in bad_words)]
         if vision_candidates:
             selected_vision = vision_candidates[0]
         else:
@@ -190,7 +191,6 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
         return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но у меня нет зрячей модели]")
 
     try:
-        # Конвертируем любые байты (включая webp-стикеры) в стандартный JPEG
         image = Image.open(io.BytesIO(image_bytes))
         if image.mode in ("RGBA", "P"):
             image = image.convert("RGB")
@@ -305,7 +305,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_tag = username  
 
-    # 1. Проверяем триггеры
     is_reply_to_bot = bool(update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id)
     is_addressed = any(word in text.lower() for word in ["валер", "валера", "валерон"])
     is_random_reply = random.random() < 0.10
@@ -328,7 +327,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     roast_text = ""
 
     try:
-        # ОБРАБОТКА МЕДИА
         if update.message.photo:
             logger.info("Обрабатываем фото...")
             f = await update.message.photo[-1].get_file()
