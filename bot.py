@@ -2,6 +2,7 @@ import os
 import random
 import logging
 import io
+import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from telegram import Update
@@ -28,39 +29,63 @@ groq_client = OpenAI(
 ) if GROQ_API_KEY else None
 
 
-# --- АВТОМАТИЧЕСКИЙ ПОДБОР РАБОЧЕЙ ТЕКСТОВОЙ МОДЕЛИ ---
-def get_active_text_model() -> str:
+# --- АВТОМАТИЧЕСКИЙ ПОДБОР ТЕКСТОВОЙ И ЗРЯЧЕЙ МОДЕЛЕЙ ---
+def get_active_models() -> tuple[str, str]:
+    default_text = "llama-3.1-8b-instant"
+    default_vision = "llama-3.2-11b-vision-preview"
+
     if not groq_client:
-        return "llama-3.1-8b-instant"
+        return default_text, default_vision
+
     try:
         models_data = groq_client.models.list().data
         available_ids = [m.id for m in models_data]
-        
-        # Приоритетный список стабильных моделей
-        priority_models = [
-            "llama-3.1-8b-instant",
+
+        # 1. Отбираем исключительно разговорные текстовые модели
+        chat_models = [
+            m_id for m_id in available_ids
+            if not any(bad in m_id.lower() for bad in ["whisper", "vision", "guard", "embed", "safetensors"])
+        ]
+        priority_text = [
             "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
             "llama3-8b-8192",
             "gemma2-9b-it"
         ]
-        
-        for model in priority_models:
-            if model in available_ids:
-                return model
-                
-        # Если ничего из списка нет, берем первую текстовую модель
-        text_models = [m_id for m_id in available_ids if "whisper" not in m_id and "vision" not in m_id]
-        if text_models:
-            return text_models[0]
-            
+        selected_text = default_text
+        for model in priority_text:
+            if model in chat_models:
+                selected_text = model
+                break
+        else:
+            if chat_models:
+                selected_text = chat_models[0]
+
+        # 2. Отбираем модель с поддержкой зрения (Vision)
+        vision_models = [m_id for m_id in available_ids if "vision" in m_id.lower() and "guard" not in m_id.lower()]
+        priority_vision = [
+            "llama-3.2-11b-vision-preview",
+            "llama-3.2-90b-vision-preview"
+        ]
+        selected_vision = default_vision
+        for model in priority_vision:
+            if model in vision_models:
+                selected_vision = model
+                break
+        else:
+            if vision_models:
+                selected_vision = vision_models[0]
+
+        return selected_text, selected_vision
+
     except Exception as e:
-        logger.error(f"Не удалось автоопределить модель: {e}")
-    
-    return "llama-3.1-8b-instant"
+        logger.error(f"Ошибка получения списка моделей: {e}")
+        return default_text, default_vision
 
 
-TEXT_MODEL = get_active_text_model()
+TEXT_MODEL, VISION_MODEL = get_active_models()
 
+# Внезапные реплики для глобального 5% шанса
 VALERA_IMPERSONATIONS = [
     "я валера",
     "я валера и я одобряю этот бред",
@@ -73,12 +98,12 @@ VALERA_IMPERSONATIONS = [
 ]
 
 
-# --- ВЕБ-СЕРВЕР ДЛЯ ХЕЛСЧЕКОВ ---
+# --- ВЕБ-СЕРВЕР ДЛЯ ХЕЛСЧЕКОВ (RENDER / KOYEB) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Valera Bot is operational!")
+        self.wfile.write(b"Valera Bot is live!")
 
     def log_message(self, format, *args):
         return
@@ -107,8 +132,8 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- ГЕНЕРАЦИЯ ПОДКОЛА ---
-async def generate_dynamic_roast(valera_text: str) -> str:
+# --- ГЕНЕРАЦИЯ ПОДКОЛА ДЛЯ ТЕКСТА/ГС ---
+async def generate_text_roast(valera_text: str) -> str:
     if not groq_client:
         return "Валера, ну что за бред ты опять выдал..."
 
@@ -123,7 +148,7 @@ async def generate_dynamic_roast(valera_text: str) -> str:
         "4. НЕ используй Markdown, звездочки (*) и форматирование."
     )
 
-    user_content = f"Валера сказал/написал: \"{valera_text}\"" if valera_text else "Валера прислал непонятное голосовое."
+    user_content = f"Валера сказал/написал: \"{valera_text}\"" if valera_text else "Валера прислал что-то непонятное."
 
     try:
         response = groq_client.chat.completions.create(
@@ -138,11 +163,53 @@ async def generate_dynamic_roast(valera_text: str) -> str:
         reply = response.choices[0].message.content.replace("*", "").strip()
         return reply if reply else "Валера, перечитай сам, что ты выдал..."
     except Exception as e:
-        logger.error(f"Ошибка в процессе генерации: {e}")
+        logger.error(f"Ошибка текстовой генерации: {e}")
         return "Валера, твои мысли снова сломали нейросеть."
 
 
-# --- ТАБЛИЦА СТАТУСА ---
+# --- АНАЛИЗ КАРТИНКИ И ПОДКОЛ ЧЕРЕЗ VISION API ---
+async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
+    if not groq_client:
+        return "Валера, у меня картинка не загрузилась, но уверен — там ерунда."
+
+    try:
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        prompt_text = (
+            "Посмотри на это изображение, которое прислал пользователь Валера в чат. "
+            "Коротко и с сарказмом подколи его за то, что нарисовано или изображено на этой картинке. "
+            "Отвечай коротко (1-2 предложения), живым разговорным языком. Без Markdown и звездочек (*)."
+        )
+        if caption:
+            prompt_text += f" Подпись к картинке от Валеры: \"{caption}\"."
+
+        response = groq_client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=120,
+            temperature=0.8
+        )
+        reply = response.choices[0].message.content.replace("*", "").strip()
+        return reply if reply else "Валера, ну и картинку ты нашёл..."
+    except Exception as e:
+        logger.error(f"Ошибка Vision API: {e}")
+        return "Валера, даже нейросеть с глазами в шоке от твоей картинки."
+
+
+# --- ТАБЛИЦА СТАТУСА ПРИ СТАРТЕ ---
 def print_startup_status_table() -> bool:
     tg_ok = "✅ ОК" if TELEGRAM_TOKEN else "❌ ОТСУТСТВУЕТ"
     key_ok = "✅ ОК" if GROQ_API_KEY else "❌ ОТСУТСТВУЕТ"
@@ -173,7 +240,8 @@ def print_startup_status_table() -> bool:
 │ TELEGRAM_TOKEN       │ {tg_ok:<47} │
 │ GROQ_API_KEY         │ {key_ok:<47} │
 │ Жертва (Target)      │ @{TARGET_USERNAME:<46} │
-│ Авто-выбранная модель│ {TEXT_MODEL:<47} │
+│ Текстовая модель     │ {TEXT_MODEL:<47} │
+│ Зрячая модель (Фото) │ {VISION_MODEL:<47} │
 │ Модель Whisper (ГС)  │ {AUDIO_MODEL:<47} │
 │ Статус ИИ            │ {text_status:<47} │
 │ Тестовый отклик      │ {test_response[:45]:<47} │
@@ -183,7 +251,7 @@ def print_startup_status_table() -> bool:
     return is_working and bool(TELEGRAM_TOKEN)
 
 
-# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
+# --- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.from_user:
         return
@@ -191,35 +259,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     username = user.username.lower() if user.username else ""
 
-    # 1. 5% шанс написать "я валера" на ЛЮБОЕ сообщение
+    # 1. ГЛОБАЛЬНЫЙ 5% ШАНС: написать "я валера" на ЛЮБОЕ сообщение в чате
     if random.random() < 0.05:
         valera_phrase = random.choice(VALERA_IMPERSONATIONS)
         logger.info(f"🎲 5% глобальный шанс сработал! Отправляем: '{valera_phrase}'")
         await update.message.reply_text(valera_phrase)
         return
 
-    # 2. 5% шанс подколоть сообщения/ГС Валеры (@soult0ken)
+    # 2. ПЕРСОНАЛЬНЫЙ 5% ШАНС: подколоть Валеру (@soult0ken)
     if username == TARGET_USERNAME:
         if random.random() < 0.05:
             logger.info("🎯 5% шанс сработал на Валеру!")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-            valera_text = ""
+            roast_text = ""
 
-            if update.message.text or update.message.caption:
-                valera_text = update.message.text or update.message.caption or ""
+            # А) Если Валера прислал фото
+            if update.message.photo:
+                try:
+                    photo_file = await update.message.photo[-1].get_file()
+                    photo_bytes = await photo_file.download_as_bytearray()
+                    caption = update.message.caption or ""
+                    logger.info("🖼 Скачиваем картинку Валеры для анализа...")
+                    roast_text = await generate_image_roast(bytes(photo_bytes), caption)
+                except Exception as e:
+                    logger.error(f"Не удалось обработать фото Валеры: {e}")
+                    roast_text = "Валера, твоя картинка не грузится, но мем наверняка баян."
 
+            # Б) Если Валера прислал голосовое сообщение
             elif update.message.voice:
                 try:
                     voice_file = await update.message.voice.get_file()
                     voice_bytes = await voice_file.download_as_bytearray()
                     valera_text = await transcribe_voice(bytes(voice_bytes))
                     logger.info(f"🎙 Расшифрованное ГС Валеры: '{valera_text}'")
+                    roast_text = await generate_text_roast(valera_text)
                 except Exception as e:
                     logger.error(f"Не удалось скачать или расшифровать ГС: {e}")
+                    roast_text = "Валера, у тебя даже голосовухи нормально не записываются."
 
-            roast_text = await generate_dynamic_roast(valera_text)
-            await update.message.reply_text(roast_text)
+            # В) Если Валера написал обычный текст или прислал подпись
+            elif update.message.text or update.message.caption:
+                valera_text = update.message.text or update.message.caption or ""
+                roast_text = await generate_text_roast(valera_text)
+
+            if roast_text:
+                await update.message.reply_text(roast_text)
 
 
 def main():
@@ -231,11 +316,12 @@ def main():
         logger.warning("⚠️ Проверьте параметры подключения в таблице выше.")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
+    # Слушаем абсолютно все входящие сообщения (текст, фото, ГС, стикеры)
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Бот запущен и слушает чат...")
+    logger.info("🤖 Бот запущен, зрение подключено, слушает чат...")
     
-    # drop_pending_updates=True устраняет 409 Conflict при перезапусках
     application.run_polling(drop_pending_updates=True)
 
 
