@@ -131,7 +131,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать картинку.")
             return
 
-    # ЖИВОЙ СИСТЕМНЫЙ ПРОМПТ (возвращаем свободу мысли и стиль общения)
+    # Инициализация истории чата
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
@@ -145,7 +145,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
         ]
 
-    # Формируем контент для истории
+    # Безопасное формирование истории без вложенных списков
     if image_url:
         msg_content = f"{user_name} прислал картинку. Текст: {user_text}" if user_text else f"{user_name} прислал картинку."
     else:
@@ -153,9 +153,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_histories[chat_id].append({"role": "user", "content": msg_content})
     
-    # Нормальная длина памяти, чтобы диалог не обрывался на полуслове
-    if len(chat_histories[chat_id]) > 14:
-        chat_histories[chat_id] = [chat_histories[chat_id][0]] + chat_histories[chat_id][-13:]
+    # Контроль длины истории
+    history = chat_histories[chat_id]
+    if len(history) > 14:
+        chat_histories[chat_id] = [history[0]] + history[-13:]
 
     is_reply_to_bot = (
         update.message.reply_to_message 
@@ -189,7 +190,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # Возвращаем адекватную температуру (0.75), чтобы у текста появился характер, глубина и стиль
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
