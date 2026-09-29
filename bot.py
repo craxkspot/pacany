@@ -162,24 +162,22 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- ЖЕСТКИЙ ТРОЛЛИНГ ТЕКСТА/ГС ---
+# --- НОРМАЛЬНЫЙ ЕДКИЙ ТРОЛЛИНГ ТЕКСТА/ГС ---
 async def generate_text_roast(valera_text: str) -> str:
     if not groq_client:
-        return "Валера, ну что за хуйню ты опять высрал..."
+        return "Валера, ну что за хуйню ты опять высрал."
 
     system_prompt = (
-        "Ты — токсичный, жесткий и абсолютно безжалостный тролль из интернет-чата. "
-        "Твоя цель — жестко и едко опустить пользователя по имени Валера (включая текст из его голосовух), "
-        "используя черный юмор, агрессивный сарказм и мат.\n"
+        "Ты — токсичный и дерзкий тип из пацанского чата. Твоя задача — жестко, понятно и с матом "
+        "опустить Валеру за то, что он написал или сказал. Никакого бреда, шизофрении и поэзии.\n"
         "ПРАВИЛА:\n"
-        "1. Отвечай коротко, емко и больно (1–2 предложения, без лишней воды и поэм).\n"
-        "2. Общайся как реальный токсичный тип из пацанского или гиковского чата, смело используй мат.\n"
-        "3. Точечно и жестоко высмеивай именно то, что он написал или сказал.\n"
-        "4. НЕ используй Markdown, звездочки (*) и форматирование.\n"
-        "5. ВСЕГДА завершай мысль точкой, не обрывай текст на полуслове."
+        "1. Пиши понятным языком, без абстрактных метафор и галлюцинаций.\n"
+        "2. Используй живой мат и нормальный сленг, можно высказаться на пару предложений, если есть что сказать.\n"
+        "3. Бей по фактам, высмеивай его тупость или стиль общения.\n"
+        "4. Без звездочек, без Markdown, заканчивай мысль точкой."
     )
 
-    user_content = f"Валера высрал: \"{valera_text}\"" if valera_text else "Валера прислал какую-то непонятную хуйню."
+    user_content = f"Валера сказал: \"{valera_text}\"" if valera_text else "Валера прислал какую-то хуйню без звука."
 
     try:
         response = groq_client.chat.completions.create(
@@ -188,17 +186,17 @@ async def generate_text_roast(valera_text: str) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ],
-            max_tokens=250,
-            temperature=0.9
+            max_tokens=120,
+            temperature=0.7
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Валера, блять, перечитай сам какую хуйню ты сморозил..."
+        return reply if reply else "Валера, блять, даже нейросеть твой бред не осилила."
     except Exception as e:
         logger.error(f"Ошибка текстовой генерации: {e}")
-        return "Валера, твои тупые мысли даже нейросеть крашнули нахуй."
+        return "Валера, твои мысли сломали бота нахуй."
 
 
-# --- ЖЕСТКИЙ ТРОЛЛИНГ КАРТИНОК И ВИДЕО (КРУЖКОВ) ---
+# --- НОРМАЛЬНЫЙ ЕДКИЙ ТРОЛЛИНГ КАРТИНОК И ВИДЕО ---
 async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
     if not groq_client:
         return "Валера, у меня медиа твоё не прогрузилось, но уверен — там полная параша."
@@ -207,10 +205,10 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
         prompt_text = (
-            "Посмотри на это изображение (или кадр из видеокружка), которое прислал этот клоун Валера. "
-            "Жестко, с матом и едким сарказмом подколи его за то, как он выглядит или что там происходит. "
-            "Отвечай коротко (1-2 предложения), разговорным токсичным языком, без звездочек (*) и Markdown. "
-            "Обязательно завершай мысль точкой."
+            "Посмотри на это изображение или кружок, который прислал Валера. "
+            "Жестко, с матом и понятным сарказмом прокомментируй это. "
+            "Говори нормально, без шизофрении и стихов, можно развернуто на 2-3 предложения. "
+            "Без звездочек и Markdown, завершай точкой."
         )
         if caption:
             prompt_text += f" Подпись Валеры: \"{caption}\"."
@@ -231,14 +229,14 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
                     ]
                 }
             ],
-            max_tokens=250,
-            temperature=0.9
+            max_tokens=120,
+            temperature=0.7
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Валера, ну и рожу ты скинул, пиздец просто..."
+        return reply if reply else "Валера, ну и кал ты скинул, пиздец."
     except Exception as e:
         logger.error(f"Ошибка Vision API: {e}")
-        return "Валера, даже у нейросети глаза кровят от твоего кружка."
+        return "Валера, у нейросети глаза кровят от твоей медиа-хуйни."
 
 
 # --- КОМАНДА /ping ---
@@ -341,14 +339,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     video_file = await update.message.video_note.get_file()
                     logger.info("🎥 Скачиваем видео-кружок Валеры для разноса...")
                     
-                    # Скачиваем кружок во временный файл, чтобы вытащить превью/кадр
                     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_video:
                         temp_video_path = temp_video.name
                     
                     await video_file.download_to_drive(temp_video_path)
                     
-                    # Читаем байты видео (Vision API Groq принимает кадры как картинку, 
-                    # передаем как jpeg-байт обертку, если модель поддерживает или напрямую отдаем байты)
                     with open(temp_video_path, "rb") as f:
                         video_bytes = f.read()
                         
