@@ -37,20 +37,36 @@ Image.MAX_IMAGE_PIXELS = 50_000_000
 
 # --- ОКРУЖЕНИЕ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-API_KEY = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 MASTER_USERNAME = "muctep_kpunep"
 
+# Основной клиент — OpenRouter (для текста)
 client = (
     OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=API_KEY,
+        api_key=OPENROUTER_API_KEY,
         timeout=45.0,
         max_retries=0,
     )
-    if API_KEY
+    if OPENROUTER_API_KEY
     else None
 )
+
+# Второй клиент — Groq (для зрения, если есть ключ). Он надёжнее шаред-пула OpenRouter.
+groq_client = (
+    OpenAI(
+        base_url="https://api.groq.com/openai/v1",
+        api_key=GROQ_API_KEY,
+        timeout=45.0,
+        max_retries=0,
+    )
+    if GROQ_API_KEY
+    else None
+)
+
+GROQ_VISION_MODEL = "llama-3.2-11b-vision-preview"
 
 
 # --- ПАМЯТЬ ЧАТОВ ---
@@ -102,7 +118,16 @@ def reset_history(chat_id: int) -> None:
     chat_last_seen.pop(chat_id, None)
 
 
-# --- ФИЛЬТР МУСОРА ---
+def _append_history(chat_id: int, role: str, content: str) -> None:
+    """Склеивает соседние сообщения одной роли, чтобы не ловить 400 alternation error."""
+    hist = get_history(chat_id)
+    if hist and hist[-1].get("role") == role:
+        hist[-1]["content"] = (hist[-1]["content"] + "\n" + content).strip()
+    else:
+        hist.append({"role": role, "content": content})
+
+
+# --- ФИЛЬТР МУСОРА В ОТВЕТЕ ---
 BANNED_WORDS_RE = re.compile(
     r"\b(чож|чо\b|чот|валер\b|валера\b|валерон|дружище|братан|бро\b)",
     re.IGNORECASE,
@@ -125,26 +150,56 @@ def sanitize_reply(text: str) -> str:
     return text.strip()
 
 
-# --- ПУЛЫ МОДЕЛЕЙ (правильное определение зрячих) ---
+# --- ПУЛЫ МОДЕЛЕЙ ---
 DEFAULT_TEXT_MODELS = [
     "meta-llama/llama-3.1-8b-instruct:free",
     "google/gemma-2-9b-it:free",
     "mistralai/mistral-7b-instruct:free",
     "deepseek/deepseek-chat:free",
 ]
-DEFAULT_VISION_MODELS = [
+
+# Отдельный явный whitelist реально зрячих бесплатных моделей OpenRouter.
+# Проверено практикой; добавляй только те, что действительно принимают image.
+EXPLICIT_VISION_WHITELIST = {
+    "google/gemini-2.0-flash-exp:free",
+    "google/gemini-2.0-flash-thinking-exp:free",
     "meta-llama/llama-3.2-11b-vision-instruct:free",
     "qwen/qwen-2-vl-7b-instruct:free",
-    "google/gemini-2.0-flash-exp:free",
+    "qwen/qwen-2.5-vl-7b-instruct:free",
+}
+
+# Мусор по имени, который никогда не должен попасть ни в один пул.
+UTILITY_NAME_MARKERS = [
+    "embed", "tts", "audio", "whisper", "rerank", "reward",
+    "guard", "moderation", "content-safety", "safety",
+    "thinkingmachines/inkling",  # agentic-only, всегда 403
 ]
 
-# Модели, которые в этой сессии процесса уже провалились с "no image support".
-# Их больше не пробуем как зрячие.
-VISION_BLACKLIST: set = set()
+# Рантайм-блэклист: сюда попадают модели, провалившиеся навсегда
+# (403 agentic, 404 no image support).
+VISION_PERMABLACKLIST: set = set()
+TEXT_PERMABLACKLIST: set = set()
+
+# Cooldown для 429: не пробуем модель в течение N секунд после rate-limit.
+RATE_LIMIT_COOLDOWN_SEC = 90
+_rate_limited_until: dict = {}
+
+
+def _in_cooldown(model_id: str) -> bool:
+    until = _rate_limited_until.get(model_id, 0)
+    return time.time() < until
+
+
+def _mark_rate_limited(model_id: str) -> None:
+    _rate_limited_until[model_id] = time.time() + RATE_LIMIT_COOLDOWN_SEC
+
+
+def _is_utility_name(mid: str) -> bool:
+    low = mid.lower()
+    return any(w in low for w in UTILITY_NAME_MARKERS)
 
 
 def _fetch_openrouter_models() -> list:
-    """Тянем полный список моделей с метаданными (architecture.input_modalities)."""
     try:
         r = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
         r.raise_for_status()
@@ -155,25 +210,12 @@ def _fetch_openrouter_models() -> list:
         return []
 
 
-def _supports_image(model_info: dict) -> bool:
-    """Проверяем именно architecture.input_modalities, а не имя."""
-    arch = model_info.get("architecture") or {}
-    mods = arch.get("input_modalities") or []
-    return isinstance(mods, list) and "image" in mods
-
-
-def _looks_like_utility(mid: str) -> bool:
-    bad = ["embed", "tts", "audio", "guard", "moderation", "rerank", "whisper"]
-    low = mid.lower()
-    return any(w in low for w in bad)
-
-
 def get_model_pools():
     data = _fetch_openrouter_models()
 
     if not data:
         logger.warning("OpenRouter не отдал модели, работаю на дефолтах")
-        return DEFAULT_TEXT_MODELS, DEFAULT_VISION_MODELS
+        return DEFAULT_TEXT_MODELS, list(EXPLICIT_VISION_WHITELIST)
 
     text_models = []
     vision_models = []
@@ -182,38 +224,35 @@ def get_model_pools():
         mid = m.get("id")
         if not mid or ":free" not in mid.lower():
             continue
-        if _looks_like_utility(mid):
+        if _is_utility_name(mid):
+            continue
+        if mid in VISION_PERMABLACKLIST or mid in TEXT_PERMABLACKLIST:
             continue
 
-        if _supports_image(m) and mid not in VISION_BLACKLIST:
+        # Зрячими считаем ТОЛЬКО те, что в явном whitelist.
+        # Поле architecture.input_modalities на практике врёт: провайдеры
+        # возвращают 404 "no image support" для моделей с флагом image.
+        if mid in EXPLICIT_VISION_WHITELIST:
             vision_models.append(mid)
         else:
             text_models.append(mid)
 
-    # Если зрячих вообще нет — не выдумываем, оставляем пул пустым.
-    # Фоллбэк на DEFAULT_VISION_MODELS включаем только если OpenRouter совсем недоступен.
-    # Здесь данные есть, значит честно сообщаем: зрячих :free нет.
     if not text_models:
         text_models = DEFAULT_TEXT_MODELS
+    if not vision_models:
+        vision_models = list(EXPLICIT_VISION_WHITELIST)
 
     logger.info(
-        f"Модели OpenRouter: текстовых {len(text_models)}, "
-        f"зрячих по input_modalities {len(vision_models)}"
+        f"Модели: текстовых {len(text_models)}, зрячих {len(vision_models)} "
+        f"(OpenRouter whitelist)"
     )
-    if vision_models:
-        logger.info(f"Зрячие: {vision_models[:5]}")
-    else:
-        logger.warning(
-            "Среди бесплатных моделей OpenRouter сейчас нет ни одной, "
-            "которая официально принимает image на входе. Фото обрабатываться не будут."
-        )
+    logger.info(f"Зрячие: {vision_models}")
 
     return text_models[:20], vision_models[:20]
 
 
 TEXT_POOL, VISION_POOL = get_model_pools()
 PRIMARY_TEXT_MODEL = TEXT_POOL[0] if TEXT_POOL else DEFAULT_TEXT_MODELS[0]
-PRIMARY_VISION_MODEL = VISION_POOL[0] if VISION_POOL else "(нет)"
 
 
 # --- ВЕБ-ПОИСК ---
@@ -269,7 +308,7 @@ def run_web_server():
     HTTPServer(("0.0.0.0", port), HealthCheckHandler).serve_forever()
 
 
-# --- СИСТЕМНЫЙ ПРОМПТ ---
+# --- ПРОМПТЫ ---
 def build_system_prompt(extra_facts: str = "") -> str:
     base = (
         f"Ты — Валера, язвительный и циничный участник чата. Твой создатель — @{MASTER_USERNAME}.\n\n"
@@ -290,10 +329,56 @@ def build_system_prompt(extra_facts: str = "") -> str:
     return base
 
 
+VISION_SYSTEM_PROMPT = (
+    f"Ты — Валера, язвительный участник чата. Твой создатель — @{MASTER_USERNAME}.\n"
+    "Тебе дали изображение. Посмотри на него внимательно и скажи по нему 1–2 коротких едких предложения.\n"
+    "ПРАВИЛА:\n"
+    "1. Обязательно опиши, что реально видно (объект, люди, текст, сцена) — своими словами, коротко.\n"
+    "2. Стеби по существу увиденного, без выдумок и абстракций.\n"
+    "3. Пиши строчными буквами, без markdown, без точки в конце.\n"
+    "4. НИКОГДА не пиши слова: чож, чо, чот, валер, валера, валерон, дружище, братан, бро."
+)
+
+
+# --- ХЕЛПЕРЫ ДЛЯ РАБОТЫ С ОТВЕТАМИ МОДЕЛЕЙ ---
+def _extract_reply(response) -> str:
+    """Безопасно вытаскивает текст ответа. Возвращает '' при любой аномалии."""
+    if response is None:
+        return ""
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return ""
+    first = choices[0]
+    msg = getattr(first, "message", None)
+    if msg is None:
+        return ""
+    content = getattr(msg, "content", None)
+    if not isinstance(content, str):
+        return ""
+    return content
+
+
+def _is_permanent_failure(e: Exception) -> str:
+    """
+    Возвращает 'agentic' | 'no_image' | '' — тип фатальной ошибки модели.
+    """
+    s = str(e).lower()
+    if "agentic harnesses" in s or "gate free endpoints by agentic" in s:
+        return "agentic"
+    if "no endpoints found that support image" in s:
+        return "no_image"
+    return ""
+
+
+def _is_rate_limit(e: Exception) -> bool:
+    s = str(e)
+    return " 429 " in s or "429 Too Many" in s or "'code': 429" in s
+
+
 # --- ГЕНЕРАЦИЯ ТЕКСТА ---
 async def generate_text_reply(chat_id: int, user_message_for_history: str, prompt_for_model: str) -> str:
     if not client:
-        return "нет api-ключа, я туплю"
+        return ""
 
     extra_facts = ""
     if SEARCH_TRIGGER_RE.match(prompt_for_model):
@@ -309,8 +394,10 @@ async def generate_text_reply(chat_id: int, user_message_for_history: str, promp
     messages.extend(history)
     messages.append({"role": "user", "content": prompt_for_model})
 
-    last_error = None
-    for model_name in TEXT_POOL:
+    for model_name in list(TEXT_POOL):
+        if _in_cooldown(model_name):
+            logger.info(f"[текст] {model_name} в cooldown, пропускаю")
+            continue
         try:
             logger.info(f"[текст] пробуем {model_name}")
             response = client.chat.completions.create(
@@ -320,27 +407,35 @@ async def generate_text_reply(chat_id: int, user_message_for_history: str, promp
                 temperature=0.85,
                 top_p=0.9,
             )
-            choice = response.choices[0]
-            reply_raw = (choice.message.content or "") if choice.message else ""
-            reply = sanitize_reply(reply_raw)
+            reply = sanitize_reply(_extract_reply(response))
             if not reply:
                 logger.info(f"[текст] {model_name} дал пустой ответ")
                 continue
 
             with lock:
-                hist = get_history(chat_id)
-                hist.append({"role": "user", "content": user_message_for_history})
-                hist.append({"role": "assistant", "content": reply})
+                _append_history(chat_id, "user", user_message_for_history)
+                _append_history(chat_id, "assistant", reply)
 
             logger.info(f"[текст] ок через {model_name}")
             return reply
 
         except Exception as e:
-            last_error = e
-            logger.warning(f"[текст] {model_name} упала: {e}")
+            kind = _is_permanent_failure(e)
+            if kind:
+                TEXT_PERMABLACKLIST.add(model_name)
+                try:
+                    TEXT_POOL.remove(model_name)
+                except ValueError:
+                    pass
+                logger.warning(f"[текст] {model_name} — постоянный фейл ({kind}), убрал из пула")
+            elif _is_rate_limit(e):
+                _mark_rate_limited(model_name)
+                logger.warning(f"[текст] {model_name} 429, cooldown {RATE_LIMIT_COOLDOWN_SEC}s")
+            else:
+                logger.warning(f"[текст] {model_name} упала: {e}")
             continue
 
-    logger.error(f"[текст] все модели упали. Последняя ошибка: {last_error}")
+    logger.warning("[текст] все модели провалились или в cooldown")
     return ""
 
 
@@ -356,16 +451,65 @@ def _prepare_image(image_bytes: bytes) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def _is_no_image_support_error(e: Exception) -> bool:
-    s = str(e).lower()
-    markers = [
-        "no endpoints found that support image",
-        "does not support image",
-        "unsupported image",
-        "image input is not supported",
-        "invalid content type for image",
-    ]
-    return any(m in s for m in markers)
+async def _try_vision_openrouter(messages) -> str:
+    if not client:
+        return ""
+    for model_name in list(VISION_POOL):
+        if model_name in VISION_PERMABLACKLIST:
+            continue
+        if _in_cooldown(model_name):
+            logger.info(f"[зрение] {model_name} в cooldown, пропускаю")
+            continue
+        try:
+            logger.info(f"[зрение] пробуем {model_name}")
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                max_tokens=220,
+                temperature=0.85,
+            )
+            reply = sanitize_reply(_extract_reply(response))
+            if not reply:
+                logger.info(f"[зрение] {model_name} пусто")
+                continue
+            logger.info(f"[зрение] ок через {model_name}")
+            return reply
+        except Exception as e:
+            kind = _is_permanent_failure(e)
+            if kind:
+                VISION_PERMABLACKLIST.add(model_name)
+                try:
+                    VISION_POOL.remove(model_name)
+                except ValueError:
+                    pass
+                logger.warning(f"[зрение] {model_name} постоянно недоступна ({kind}), убрал")
+            elif _is_rate_limit(e):
+                _mark_rate_limited(model_name)
+                logger.warning(f"[зрение] {model_name} 429, cooldown {RATE_LIMIT_COOLDOWN_SEC}s")
+            else:
+                logger.warning(f"[зрение] {model_name} упала: {e}")
+            continue
+    return ""
+
+
+async def _try_vision_groq(messages) -> str:
+    if not groq_client:
+        return ""
+    try:
+        logger.info(f"[зрение] пробуем Groq {GROQ_VISION_MODEL}")
+        response = groq_client.chat.completions.create(
+            model=GROQ_VISION_MODEL,
+            messages=messages,
+            max_tokens=220,
+            temperature=0.85,
+        )
+        reply = sanitize_reply(_extract_reply(response))
+        if reply:
+            logger.info("[зрение] ок через Groq")
+            return reply
+    except Exception as e:
+        logger.warning(f"[зрение] Groq упала: {e}")
+    return ""
 
 
 async def generate_image_reply(
@@ -375,16 +519,7 @@ async def generate_image_reply(
     media_type: str,
     image_bytes: bytes,
 ) -> str:
-    """
-    Пытается получить осмысленный ответ по картинке.
-    Если ни одна зрячая модель не работает — возвращает пустую строку.
-    Никакого абстрактного текстового фоллбэка: лучше промолчать, чем выдать бред.
-    """
-    if not client:
-        return ""
-
-    if not VISION_POOL:
-        logger.info("[зрение] пул пуст, на картинки не отвечаем")
+    if not client and not groq_client:
         return ""
 
     try:
@@ -395,21 +530,11 @@ async def generate_image_reply(
 
     user_prompt_text = caption.strip() if caption and caption.strip() else f"что тут на этом {media_type}?"
 
-    system_prompt = (
-        f"Ты — Валера, язвительный участник чата. Твой создатель — @{MASTER_USERNAME}.\n"
-        "Тебе дали изображение. Посмотри на него внимательно и скажи по нему 1–2 коротких едких предложения.\n"
-        "ПРАВИЛА:\n"
-        "1. Обязательно опиши, что реально видно (объект, люди, текст, сцена) — своими словами, коротко.\n"
-        "2. Стеби по существу увиденного, без выдумок и абстракций.\n"
-        "3. Пиши строчными буквами, без markdown, без точки в конце.\n"
-        "4. НИКОГДА не пиши слова: чож, чо, чот, валер, валера, валерон, дружище, братан, бро."
-    )
-
     lock = _get_lock(chat_id)
     with lock:
         history = list(get_history(chat_id))
 
-    messages = [{"role": "system", "content": system_prompt}]
+    messages = [{"role": "system", "content": VISION_SYSTEM_PROMPT}]
     messages.extend(history)
     messages.append(
         {
@@ -424,51 +549,21 @@ async def generate_image_reply(
         }
     )
 
-    tried = 0
-    for model_name in list(VISION_POOL):
-        tried += 1
-        try:
-            logger.info(f"[зрение] пробуем {model_name}")
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                max_tokens=220,
-                temperature=0.85,
-            )
-            choice = response.choices[0]
-            reply_raw = (choice.message.content or "") if choice.message else ""
-            reply = sanitize_reply(reply_raw)
-            if not reply:
-                logger.info(f"[зрение] {model_name} дал пустой ответ")
-                continue
+    # 1. Пробуем Groq — он самый стабильный для бесплатного зрения.
+    reply = await _try_vision_groq(messages)
 
-            with lock:
-                hist = get_history(chat_id)
-                hist.append({"role": "user", "content": user_message_for_history})
-                hist.append({"role": "assistant", "content": reply})
+    # 2. Пробуем OpenRouter whitelist.
+    if not reply:
+        reply = await _try_vision_openrouter(messages)
 
-            logger.info(f"[зрение] ок через {model_name}")
-            return reply
+    if not reply:
+        logger.warning("[зрение] ни один провайдер не ответил. Молчу.")
+        return ""
 
-        except Exception as e:
-            if _is_no_image_support_error(e):
-                logger.warning(
-                    f"[зрение] {model_name} не принимает картинки, добавляю в блэклист"
-                )
-                VISION_BLACKLIST.add(model_name)
-                try:
-                    VISION_POOL.remove(model_name)
-                except ValueError:
-                    pass
-            else:
-                logger.warning(f"[зрение] {model_name} упала: {e}")
-            continue
-
-    logger.warning(
-        f"[зрение] все {tried} моделей из пула провалились, "
-        f"в блэклисте теперь {len(VISION_BLACKLIST)} моделей. Ответ на картинку не отправлен."
-    )
-    return ""
+    with lock:
+        _append_history(chat_id, "user", user_message_for_history)
+        _append_history(chat_id, "assistant", reply)
+    return reply
 
 
 # --- КОМАНДЫ ---
@@ -479,9 +574,10 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 Валера на связи\n"
         f"• папочка: {MASTER_USERNAME}\n"
         f"• текстовых моделей: {len(TEXT_POOL)}\n"
-        f"• зрячих моделей: {len(VISION_POOL)}\n"
-        f"• заблэклистено как 'не зрячих': {len(VISION_BLACKLIST)}\n"
-        f"• активное зрение: {VISION_POOL[0] if VISION_POOL else '(нет)'}"
+        f"• зрячих моделей (OR whitelist): {len(VISION_POOL)}\n"
+        f"• Groq vision: {'✅ ' + GROQ_VISION_MODEL if groq_client else '❌ нет ключа'}\n"
+        f"• permablacklist: text={len(TEXT_PERMABLACKLIST)} vision={len(VISION_PERMABLACKLIST)}\n"
+        f"• в cooldown сейчас: {sum(1 for m in _rate_limited_until if _in_cooldown(m))}"
     )
     await update.message.reply_text(status)
 
@@ -528,9 +624,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not should_reply:
         with _get_lock(chat_id):
-            hist = get_history(chat_id)
             if text:
-                hist.append({"role": "user", "content": f"[{username}]: {text}"})
+                _append_history(chat_id, "user", f"[{username}]: {text}")
             elif any(
                 [
                     update.message.photo,
@@ -542,7 +637,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     update.message.audio,
                 ]
             ):
-                hist.append({"role": "user", "content": f"[{username} скинул медиа]"})
+                _append_history(chat_id, "user", f"[{username} скинул медиа]")
         return
 
     try:
@@ -618,16 +713,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- СТАРТ ---
 def print_startup_status() -> None:
-    vision_line = VISION_POOL[0] if VISION_POOL else "(нет ни одной)"
     logger.info(
         "\n"
         "┌──────────────────────────────────────────────────────────┐\n"
         "│                   ЗАПУСК ВАЛЕРЫ                          │\n"
         "├────────────────────┬─────────────────────────────────────┤\n"
         f"│ Основной текст     │ {PRIMARY_TEXT_MODEL:<35} │\n"
-        f"│ Основное зрение    │ {vision_line:<35} │\n"
+        f"│ Groq vision        │ {(GROQ_VISION_MODEL if groq_client else '(нет ключа)'):<35} │\n"
         f"│ Текстовый пул      │ {len(TEXT_POOL):<35} │\n"
-        f"│ Зрячий пул         │ {len(VISION_POOL):<35} │\n"
+        f"│ Зрячий пул (OR)    │ {len(VISION_POOL):<35} │\n"
         "└────────────────────┴─────────────────────────────────────┘"
     )
 
@@ -635,8 +729,10 @@ def print_startup_status() -> None:
 def main():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN не задан")
-    if not API_KEY:
-        logger.warning("API_KEY не задан — бот не сможет генерировать ответы")
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY не задан — текстовые ответы работать не будут")
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY не задан — зрения через Groq не будет")
 
     Thread(target=run_web_server, daemon=True).start()
     print_startup_status()
