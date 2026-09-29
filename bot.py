@@ -68,49 +68,43 @@ def search_web(query: str) -> str:
         return "интернет-поиск временно отрыгнул"
 
 
-# --- УМНЫЙ АВТОПОДБОР 3-Х МОДЕЛЕЙ (Текст, Зрение, Слух) ---
+# --- АВТОМАТИЧЕСКИЙ ПОИСК РАБОЧЕЙ МОДЕЛИ ИЗ ДОСТУПНЫХ ---
 def get_active_models() -> tuple[str, str, str]:
     selected_text, selected_vision, selected_audio = None, None, None
 
     if not groq_client:
-        return "openai/gpt-oss-120b", "qwen/qwen3.8-27b", "whisper-large-v3-turbo"
+        return "llama-3.1-8b-instant", "qwen/qwen3.8-27b", "whisper-large-v3-turbo"
 
     try:
         models_data = groq_client.models.list().data
         available_ids = [m.id for m in models_data if "decommissioned" not in m.id.lower()]
         logger.info(f"Доступные модели на Groq: {available_ids}")
 
-        bad_words = ["whisper", "guard", "safeguard", "orpheus", "audio"]
+        # Стоп-слова для исключения служебных/неподходящих моделей
+        bad_words = ["whisper", "guard", "safeguard", "audio", "embed", "tts"]
 
-        # 1. Текстовая модель
-        preferred_texts = ["gpt-oss-120b", "qwen3.8-27b", "llama", "qwen", "mixtral"]
-        for pref in preferred_texts:
-            found = [m for m in available_ids if pref in m.lower() and not any(bw in m.lower() for bw in bad_words) and "vision" not in m.lower()]
-            if found:
-                selected_text = found[0]
-                break
-        if not selected_text:
-            texts = [m for m in available_ids if not any(bw in m.lower() for bw in bad_words)]
-            if texts:
-                selected_text = texts[0]
+        # Ищем первую попавшуюся текстовую модель из доступных
+        text_candidates = [m for m in available_ids if not any(bw in m.lower() for bw in bad_words) and "vision" not in m.lower()]
+        if text_candidates:
+            selected_text = text_candidates[0]
 
-        # 2. Зрячая модель (Qwen поддерживается как мультимодальная для зрения)
-        visions = [m for m in available_ids if "qwen" in m.lower() or "vision" in m.lower()]
-        if visions:
-            selected_vision = visions[0]
+        # Ищем модель со зрением
+        vision_candidates = [m for m in available_ids if "vision" in m.lower() or "qwen" in m.lower()]
+        if vision_candidates:
+            selected_vision = vision_candidates[0]
         else:
             selected_vision = selected_text
 
-        # 3. Аудио модель
-        audios = [m for m in available_ids if "whisper" in m.lower() or "audio" in m.lower()]
-        if audios:
-            selected_audio = audios[0]
+        # Ищем аудиомодель
+        audio_candidates = [m for m in available_ids if "whisper" in m.lower()]
+        if audio_candidates:
+            selected_audio = audio_candidates[0]
 
     except Exception as e:
         logger.error(f"Ошибка автоподбора моделей: {e}")
 
     return (
-        selected_text or "openai/gpt-oss-120b",
+        selected_text or "llama-3.1-8b-instant",
         selected_vision or "qwen/qwen3.8-27b",
         selected_audio or "whisper-large-v3-turbo"
     )
@@ -167,7 +161,15 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
         response = groq_client.chat.completions.create(
             model=TEXT_MODEL, messages=messages, max_tokens=200, temperature=0.75
         )
-        reply = response.choices[0].message.content.replace("*", "").strip()
+        
+        choice = response.choices[0]
+        reply = choice.message.content if choice.message and choice.message.content else ""
+        reply = reply.replace("*", "").strip()
+
+        if not reply:
+            logger.error(f"❌ Модель {TEXT_MODEL} вернула пустой контент! Finish reason: {choice.finish_reason}")
+            return "у меня пустой бак, модель прислала пустоту"
+
         if reply.endswith("."):
             reply = reply[:-1]
         reply = reply.lower().replace("чож", "").replace("чо ", "че ").strip()
@@ -176,7 +178,7 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
         chat_histories[chat_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
-        logger.error(f"Ошибка текста: {e}")
+        logger.error(f"Ошибка текста: {e}", exc_info=True)
         return "у меня словесный понос, апи лагает"
 
 
