@@ -11,11 +11,13 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 from openai import OpenAI
 import requests
+from PIL import Image
 
-# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
+# --- НАСТРОЙКА ЛОГИРОВАНИЯ (ПОСТОЯННЫЙ ВЫВОД) ---
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    force=True
 )
 logger = logging.getLogger(__name__)
 
@@ -80,22 +82,21 @@ def get_active_models() -> tuple[str, str, str]:
         available_ids = [m.id for m in models_data if "decommissioned" not in m.id.lower()]
         logger.info(f"Доступные модели на Groq: {available_ids}")
 
-        # Стоп-слова для исключения служебных/неподходящих моделей
         bad_words = ["whisper", "guard", "safeguard", "audio", "embed", "tts"]
 
-        # Ищем первую попавшуюся текстовую модель из доступных
+        # Текстовая модель
         text_candidates = [m for m in available_ids if not any(bw in m.lower() for bw in bad_words) and "vision" not in m.lower()]
         if text_candidates:
             selected_text = text_candidates[0]
 
-        # Ищем модель со зрением
+        # Модель со зрением
         vision_candidates = [m for m in available_ids if "vision" in m.lower() or "qwen" in m.lower()]
         if vision_candidates:
             selected_vision = vision_candidates[0]
         else:
             selected_vision = selected_text
 
-        # Ищем аудиомодель
+        # Аудиомодель
         audio_candidates = [m for m in available_ids if "whisper" in m.lower()]
         if audio_candidates:
             selected_audio = audio_candidates[0]
@@ -182,49 +183,67 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
         return "у меня словесный понос, апи лагает"
 
 
-# --- ОБРАБОТЧИК КАРТИНОК И СТИКЕРОВ ---
+# --- ОБРАБОТЧИК КАРТИНОК И СТИКЕРОВ С КОНВЕРТАЦИЕЙ В JPEG ---
 async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: bytes, caption: str, media_type: str) -> str:
     if not groq_client or not VISION_MODEL:
-        prompt = f"[пользователь скинул {media_type}, но у меня сейчас отключены нейро-глаза из-за сбоя серверов Groq. Высмей жестко то, что он кидает {media_type}, а не пишет буквами, и придумай смешную отмазку, почему ты не можешь это посмотреть]"
-        return await generate_text_roast(chat_id, sender_username, prompt)
+        logger.warning("⚠️ Vision API отключен или не найдена зрячая модель.")
+        return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но у меня нет зрячей модели]")
 
     try:
-        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        # Конвертируем любые байты (включая webp-стикеры) в стандартный JPEG
+        image = Image.open(io.BytesIO(image_bytes))
+        if image.mode in ("RGBA", "P"):
+            image = image.convert("RGB")
+        
+        output_buffer = io.BytesIO()
+        image.save(output_buffer, format="JPEG")
+        jpeg_bytes = output_buffer.getvalue()
+
+        base64_image = base64.b64encode(jpeg_bytes).decode('utf-8')
+        
         sys_prompt = (
             f"Ты Валера. Хозяин {MASTER_USERNAME}" if sender_username == MASTER_USERNAME else "Ты Валера. Обоссы это медиа."
-        ) + " Опиши то, что видишь, и жестко постебись. НИКАКИХ тегов через @. Пиши с маленькой буквы, без точек. Без слова 'чож'."
+        ) + " Опиши то, что видишь на картинке/стикере, и жестко постебись. НИКАКИХ тегов через @. Пиши с маленькой буквы, без точек. Без слова 'чож'."
 
         messages = [{"role": "system", "content": sys_prompt}]
         messages.extend(list(chat_histories[chat_id]))
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": caption if caption else f"проанализируй этот {media_type} и разнеси по фактам"},
+                {"type": "text", "text": caption if caption else f"что изображено на этом {media_type}? опиши и высмей"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]
         })
 
+        logger.info(f"Отправляем изображение в зрячую модель {VISION_MODEL}...")
         response = groq_client.chat.completions.create(
             model=VISION_MODEL, messages=messages, max_tokens=150, temperature=0.7
         )
-        reply = response.choices[0].message.content.replace("*", "").strip().lower()
+        
+        choice = response.choices[0]
+        reply = choice.message.content if choice.message and choice.message.content else ""
+        reply = reply.replace("*", "").strip().lower()
+
+        if not reply:
+            logger.error(f"❌ Vision модель {VISION_MODEL} вернула пустой ответ! Finish reason: {choice.finish_reason}")
+            return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но зрячая модель вернула пустоту]")
+
         if reply.endswith("."):
             reply = reply[:-1]
         
         chat_histories[chat_id].append({"role": "user", "content": f"[скинул {media_type}] {caption}"})
         chat_histories[chat_id].append({"role": "assistant", "content": reply})
         return reply
+        
     except Exception as e:
-        logger.error(f"Ошибка Vision API: {e}")
-        prompt = f"[пользователь скинул {media_type}, но при попытке его рассмотреть у меня вылетела ошибка. Придумай жесткую шутку про то, что его {media_type} настолько токсичный/уродливый, что сломал мне зрение]"
-        return await generate_text_roast(chat_id, sender_username, prompt)
+        logger.error(f"❌ Ошибка Vision API при обработке {media_type}: {e}", exc_info=True)
+        return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но произошла ошибка обработки изображения: {e}]")
 
 
 # --- ОБРАБОТЧИК АУДИО, ГС, МУЗЫКИ И КРУЖКОВ ---
 async def generate_audio_roast(chat_id: int, sender_username: str, file_bytes: bytes, file_ext: str, media_name: str) -> str:
     if not groq_client or not AUDIO_MODEL:
-        prompt = f"[пользователь записал {media_name}. У тебя временно отвалились уши (нет аудио-модели). Унизь его за то, что он бормочет в микрофон вместо того, чтобы печатать текст]"
-        return await generate_text_roast(chat_id, sender_username, prompt)
+        return await generate_text_roast(chat_id, sender_username, f"[пользователь записал {media_name}. У тебя временно отвалились уши]")
     
     try:
         audio_file = (f"audio{file_ext}", io.BytesIO(file_bytes), f"audio/{file_ext.replace('.', '')}")
@@ -234,14 +253,13 @@ async def generate_audio_roast(chat_id: int, sender_username: str, file_bytes: b
         text_result = str(transcription).strip()
         
         if not text_result:
-            return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_name}, но там тишина или невнятные шумы. Обосри его дикцию или качество микрофона]")
+            return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_name}, но там тишина]")
 
         prompt = f"[скинул {media_name}, вот расшифровка: «{text_result}»]. Разнеси его за то, что он несет в этом {media_name}!"
         return await generate_text_roast(chat_id, sender_username, prompt)
     except Exception as e:
-        logger.error(f"Ошибка Audio API: {e}")
-        prompt = f"[пользователь скинул {media_name}, но из-за сбоя ты оглох. Пошути, что от его голоса у тебя сломались перепонки, и пусть пишет буквами]"
-        return await generate_text_roast(chat_id, sender_username, prompt)
+        logger.error(f"Ошибка Audio API: {e}", exc_info=True)
+        return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_name}, но из-за сбоя ты оглох]")
 
 
 # --- КОМАНДА PING ---
@@ -279,7 +297,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if update.message.from_user.is_bot:
-        logger.info("Пропущено сообщение от другого бота.")
         return
 
     chat_id = update.effective_chat.id
@@ -325,12 +342,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 f = await update.message.sticker.get_file()
                 b = await f.download_as_bytearray()
-                roast_text = await generate_image_roast(chat_id, username, bytes(b), "стикер", "стикер")
+                roast_text = await generate_image_roast(chat_id, username, bytes(b), text or "стикер", "стикер")
                 
         elif update.message.animation or update.message.video:
             media = "гифку" if update.message.animation else "видео"
             logger.info(f"Обрабатываем {media}...")
-            roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул {media}. Жестко пройдись по нему за то, что он засоряет чат движущимся калом, который тебе лень смотреть]")
+            roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул {media}. Жестко пройдись по нему за то, что он засоряет чат движущимся калом]")
             
         elif update.message.voice or update.message.video_note or update.message.audio:
             media_name = "голосовуху" if update.message.voice else ("кружок" if update.message.video_note else "музыку")
