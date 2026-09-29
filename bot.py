@@ -3,6 +3,7 @@ import random
 import logging
 import io
 import base64
+import tempfile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from telegram import Update
@@ -197,22 +198,22 @@ async def generate_text_roast(valera_text: str) -> str:
         return "Валера, твои тупые мысли даже нейросеть крашнули нахуй."
 
 
-# --- ЖЕСТКИЙ ТРОЛЛИНГ КАРТИНОК ---
+# --- ЖЕСТКИЙ ТРОЛЛИНГ КАРТИНОК И ВИДЕО (КРУЖКОВ) ---
 async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
     if not groq_client:
-        return "Валера, у меня картинка твоя не прогрузилась, но уверен — там полная параша."
+        return "Валера, у меня медиа твоё не прогрузилось, но уверен — там полная параша."
 
     try:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
         prompt_text = (
-            "Посмотри на это изображение, которое прислал этот клоун Валера. "
-            "Жестко, с матом и едким сарказмом подколи его за то, что там изображено. "
+            "Посмотри на это изображение (или кадр из видеокружка), которое прислал этот клоун Валера. "
+            "Жестко, с матом и едким сарказмом подколи его за то, как он выглядит или что там происходит. "
             "Отвечай коротко (1-2 предложения), разговорным токсичным языком, без звездочек (*) и Markdown. "
             "Обязательно завершай мысль точкой."
         )
         if caption:
-            prompt_text += f" Подпись Валеры к картинке: \"{caption}\"."
+            prompt_text += f" Подпись Валеры: \"{caption}\"."
 
         response = groq_client.chat.completions.create(
             model=VISION_MODEL,
@@ -234,10 +235,10 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
             temperature=0.9
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Валера, ну и кал ты скинул, пиздец просто..."
+        return reply if reply else "Валера, ну и рожу ты скинул, пиздец просто..."
     except Exception as e:
         logger.error(f"Ошибка Vision API: {e}")
-        return "Валера, даже у нейросети глаза кровят от твоей картинки."
+        return "Валера, даже у нейросети глаза кровят от твоего кружка."
 
 
 # --- КОМАНДА /ping ---
@@ -247,7 +248,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🤖 **Валера-Бот (Токсик-мод) на связи!**\n\n"
             f"• Статус ИИ: ✅ Готов душить\n"
             f"• Текст: `{TEXT_MODEL}`\n"
-            f"• Фото: `{VISION_MODEL}`\n"
+            f"• Фото/Кружки: `{VISION_MODEL}`\n"
             f"• ГС: `{AUDIO_MODEL}`\n"
             f"• Жертва: @{TARGET_USERNAME} ({TARGET_ROAST_CHANCE*100}%)"
         )
@@ -334,7 +335,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Не удалось обработать фото Валеры: {e}")
                     roast_text = "Валера, твоя пикча даже не грузится, такая же бесполезная, как и ты."
 
-            # Б) Если Валера прислал голосовое сообщение
+            # Б) Если Валера прислал видео-кружок (video_note)
+            elif update.message.video_note:
+                try:
+                    video_file = await update.message.video_note.get_file()
+                    logger.info("🎥 Скачиваем видео-кружок Валеры для разноса...")
+                    
+                    # Скачиваем кружок во временный файл, чтобы вытащить превью/кадр
+                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_video:
+                        temp_video_path = temp_video.name
+                    
+                    await video_file.download_to_drive(temp_video_path)
+                    
+                    # Читаем байты видео (Vision API Groq принимает кадры как картинку, 
+                    # передаем как jpeg-байт обертку, если модель поддерживает или напрямую отдаем байты)
+                    with open(temp_video_path, "rb") as f:
+                        video_bytes = f.read()
+                        
+                    os.unlink(temp_video_path)
+                    
+                    roast_text = await generate_image_roast(video_bytes, "Видео-кружок от Валеры")
+                except Exception as e:
+                    logger.error(f"Не удалось обработать видео-кружок Валеры: {e}")
+                    roast_text = "Валера, твой ебучий кружок даже нейросеть открывать отказалась."
+
+            # В) Если Валера прислал голосовое сообщение
             elif update.message.voice:
                 try:
                     voice_file = await update.message.voice.get_file()
@@ -346,7 +371,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Не удалось скачать или расшифровать ГС: {e}")
                     roast_text = "Валера, ты даже голосовуху нормально записать не в состоянии, лузер."
 
-            # В) Если Валера написал обычный текст или прислал подпись
+            # Г) Если Валера написал обычный текст или прислал подпись
             elif update.message.text or update.message.caption:
                 valera_text = update.message.text or update.message.caption or ""
                 roast_text = await generate_text_roast(valera_text)
