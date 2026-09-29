@@ -1,16 +1,10 @@
 import os
-import json
-import random
 import logging
-import io
-import re
-import base64
-import urllib.parse
-import httpx
+import random
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from openai import OpenAI
-from tavily import TavilyClient
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from groq import Groq
+from aiohttp import web
 
 # Настройка логирования
 logging.basicConfig(
@@ -19,396 +13,144 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+# Получение переменных окружения
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+PORT = int(os.getenv("PORT", 10000))
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
-groq_client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=GROQ_API_KEY
+if not TOKEN:
+    logger.error("❌ НЕ УКАЗАН TELEGRAM_TOKEN в переменных окружения!")
+if not GROQ_API_KEY:
+    logger.error("❌ НЕ УКАЗАН GROQ_API_KEY в переменных окружения!")
+
+# Инициализация клиентов
+client = Groq(api_key=GROQ_API_KEY)
+
+PANTHER_SYSTEM_PROMPT = (
+    - "Ты Пантера — дерзкая, саркастичная, опасная и чертовски привлекательная девушка-бандитка из лихих 90-х."
+    - "Ты общаешься на сленге тех лет, презираешь слабаков, но своих братков ценишь."
+    - "Не будь унылым ботом, отвечай живо, с юмором, подколами и атмосферой криминальной романтики."
 )
 
-tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
-
-TEXT_MODEL = "qwen/qwen3.8-27b"
-VISION_MODEL = "llama-3.2-11b-vision-preview"
-
-CACHE_FILE = "user_cache.json"
-chat_histories = {}
-
-
-# --- ДОЛГОВРЕМЕННАЯ ПАМЯТЬ (JSON) ---
-def load_cache():
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Ошибка чтения кэша JSON: {e}")
-    return {"users": {}}
-
-
-def save_cache(cache):
-    try:
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cache, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        logger.error(f"Ошибка записи кэша JSON: {e}")
-
-
-user_cache = load_cache()
-
-
-def get_user_full_name(user):
-    if not user:
-        return "Пользователь"
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-    username = f" (@{user.username})" if user.username else ""
-    full_name = f"{first_name} {last_name}{username}".strip()
-    if not full_name:
-        full_name = "Аноним"
-
-    user_id = str(user.id)
-    if user_id not in user_cache["users"]:
-        user_cache["users"][user_id] = {
-            "name": full_name,
-            "facts": [],
-            "last_interaction": ""
-        }
-        save_cache(user_cache)
-    return full_name
-
-
-async def extract_and_verify_fact(text: str, author_name: str) -> str | None:
-    """ИИ-фильтр: отделяет шутки, сарказм и бред от реальных фактов о пользователях"""
-    prompt = (
-        f"Автор сообщения '{author_name}' написал: \"{text}\".\n"
-        "Содержит ли этот текст РЕАЛЬНЫЙ, конкретный факт о ком-то из людей (например: профессия, возраст, хобби, домашние животные, реальные события из жизни)?\n"
-        "ПРАВИЛА:\n"
-        "1. Игнорируй шутки, сарказм, метафоры, оскорбления в шутливой форме, мемы и очевидный бред.\n"
-        "2. Если это шутка или пустые слова, ответь строго одним словом: NO.\n"
-        "3. Если это реальный факт, сформулируй его коротко на русском языке. Выдай ТОЛЬКО этот факт без лишних слов."
-    )
-    try:
-        response = groq_client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=50,
-            temperature=0.1
-        )
-        result = response.choices[0].message.content.strip()
-        if "NO" in result or len(result) < 3:
-            return None
-        return result
-    except Exception as e:
-        logger.error(f"Ошибка фильтра фактов: {e}")
-        return None
-
-
-# --- ИИ-АРБИТР КОНТЕКСТА ---
-async def is_addressed_to_bot(user_text: str, chat_history: list) -> bool:
-    """Определяет по контексту, обращаются ли к боту"""
-    if not user_text:
+async def is_addressed_to_bot(text: str, bot_username: str) -> bool:
+    """Определяет, обращаются ли к боту в групповом чате через ИИ-арбитра."""
+    if not text:
         return False
-        
-    recent_context = "\n".join([msg.get("content", "") for msg in chat_history[-3:]])
     
-    prompt = (
-        f"История чата:\n{recent_context}\n\n"
-        f"Новое сообщение: \"{user_text}\"\n"
-        "Вопрос: Является ли это новое сообщение продолжением диалога с ИИ-ботом или обращением к нему (даже косвенным, обсуждением его поведения/слов)?\n"
-        "Ответь строго одним словом: YES или NO."
-    )
+    # Прямое упоминание или реплай
+    if bot_username.lower() in text.lower() or "пантера" in text.lower():
+        return True
+
     try:
-        response = groq_client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=5,
-            temperature=0.0
-        )
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "Ты арбитр. Определи, обращается ли пользователь в сообщении к боту по имени Пантера, или задает вопрос/фраразу, адресованную ей. Ответь строго одним словом: YES или NO."
+                },
+                {"role": "user", "content": text}
+            ],
+            temperature=0.1,
+            max_tokens=5
+        }
         answer = response.choices[0].message.content.strip().upper()
         return "YES" in answer
     except Exception as e:
-        logger.error(f"Ошибка проверки контекста арбитром: {e}")
-        return False
+        logger.error(f"Ошибка арбитра Groq: {e}")
+        return True  # В случае сбоя лучше ответить, чем промолчать
 
-
-# --- ГЕНЕРАЦИЯ КАРТИНОК С FALLBACK ---
-async def generate_image(prompt: str) -> bytes | None:
-    encoded_prompt = urllib.parse.quote(prompt)
-    seed = random.randint(1, 1000000)
-    
-    urls = [
-        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=flux",
-        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=turbo",
-        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}"
-    ]
-
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        for url in urls:
-            try:
-                response = await client.get(url, timeout=12.0)
-                if response.status_code == 200 and len(response.content) > 10000:
-                    return response.content
-            except Exception:
-                logger.warning(f"Таймаут или ошибка генерации, переключаем модель...")
-    return None
-
-
-# --- ПОИСК TAVILY ---
-def search_web_tavily(query: str) -> str:
-    if not tavily_client:
-        return ""
-    
-    clean_query = re.sub(
-        r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найди|загугли|гугл|найди)\b', 
-        '', 
-        query
-    ).strip()
-    
-    if not clean_query:
-        clean_query = query
-
-    try:
-        response = tavily_client.search(query=clean_query, search_depth="basic", max_results=3)
-        results = [item['content'] for item in response.get('results', [])]
-        if results:
-            return "\n".join(results)
-    except Exception as e:
-        logger.error(f"Ошибка поиска Tavily: {e}")
-    return ""
-
-
-def is_image_request(text: str) -> bool:
-    keywords = ["нарисуй", "сделай картинку", "сгенерируй", "замути", "отрисуй", "покажи", "сделай фото"]
-    return any(kw in text.lower() for kw in keywords)
-
-
-# --- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+    # ДИАГНОСТИЧЕСКИЙ ЛОГ: проверяем, дошел ли апдейт до функции
+    if not update.message or not update.message.text:
         return
 
-    chat_id = update.effective_chat.id
-    
-    if update.message.from_user:
-        user_name = update.message.from_user.first_name or update.message.from_user.username or "Пользователь"
-        user_id_str = str(update.message.from_user.id)
-    else:
-        user_name = "Мира"
-        user_id_str = "999999999"
-
+    user_text = update.message.text
+    user_name = update.message.from_user.first_name if update.message.from_user else "Браток"
     chat_type = update.message.chat.type
-    user_text = update.message.text or update.message.caption or ""
-    lower_text = user_text.lower()
+    bot_username = context.bot.username or "PanteraBot"
 
-    # Сбор фактов о пользователях
-    if update.message.from_user and user_id_str in user_cache["users"]:
-        user_cache["users"][user_id_str]["last_interaction"] = update.message.date.isoformat()
-        
-        if user_text and len(user_text.split()) > 1:
-            verified_fact = await extract_and_verify_fact(user_text, user_name)
-            if verified_fact:
-                if verified_fact not in user_cache["users"][user_id_str]["facts"]:
-                    user_cache["users"][user_id_str]["facts"].append(verified_fact)
-                    save_cache(user_cache)
-                    logger.info(f"Записан факт о {user_name}: {verified_fact}")
+    logger.info(f"📥 ПОЛУЧЕНО СООБЩЕНИЕ [{chat_type}] от {user_name}: {user_text}")
 
-    # Обработка картинок (фото или файлы-документы)
-    base64_image = None
-    if update.message.photo:
-        try:
-            photo_file = await update.message.photo[-1].get_file()
-            photo_bytes = await photo_file.download_as_bytearray()
-            base64_image = base64.b64encode(photo_bytes).decode('utf-8')
-        except Exception as e:
-            logger.error(f"Ошибка загрузки фото: {e}")
-    elif update.message.document:
-        doc = update.message.document
-        if doc.mime_type and doc.mime_type.startswith("image/"):
-            try:
-                doc_file = await doc.get_file()
-                doc_bytes = await doc_file.download_as_bytearray()
-                base64_image = base64.b64encode(doc_bytes).decode('utf-8')
-            except Exception as e:
-                logger.error(f"Ошибка загрузки документа-картинки: {e}")
-
-    if not user_text and not base64_image:
-        return
-
-    # Оперативная история чата (инициализация)
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = [
-            {
-                "role": "system", 
-                "content": (
-                    "Ты — адекватный, живой ИИ-собеседник. Ты подстраиваешься под вайб чата. "
-                    "ПРАВИЛА:\n"
-                    "1. Используй факты о пользователях из переданного JSON контекста, если они уместны.\n"
-                    "2. Не придумывай лишней конспирологии, понимай сленг (например 'ЗБС' — это сокращение от 'заебись' / круто).\n"
-                    "3. Пиши ТОЛЬКО обычным плоским текстом без звездочек и Markdown."
-                )
-            }
-        ]
-
-    # --- УМНЫЕ УСЛОВИЯ АКТИВАЦИИ В ГРУППЕ ---
-    if chat_type != "private":
-        is_reply_to_bot = (
-            update.message.reply_to_message 
-            and update.message.reply_to_message.from_user.id == context.bot.id
-        )
-        has_direct_keyword = any(kw in lower_text for kw in ["пантера", "pantera", "бот"]) or base64_image is not None
-
-        # Если нет прямого обращения/реплая/картинки, спрашиваем ИИ-арбитра по контексту
-        if not is_reply_to_bot and not has_direct_keyword:
-            ai_thinks_it_is_for_us = await is_addressed_to_bot(user_text, chat_histories[chat_id])
-            if not ai_thinks_it_is_for_us and random.random() < 0.85:
-                return
-
-    # Генерация изображений
-    if is_image_request(lower_text):
-        await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
-        
-        prompt_for_image = lower_text
-        for kw in ["нарисуй", "сделай", "сгенерируй", "замути", "пантера", "фото", "картинку"]:
-            prompt_for_image = prompt_for_image.replace(kw, "").strip()
-            
-        if not prompt_for_image:
-            prompt_for_image = user_text
-
-        try:
-            enh_resp = groq_client.chat.completions.create(
-                model=TEXT_MODEL,
-                messages=[
-                    {
-                        "role": "system", 
-                        "content": (
-                            "You are an expert prompt engineer. Translate to a detailed English prompt. "
-                            "Handle Russian slang ORGANICALLY: 'пудж' = Pudge Dota 2, 'скуф' = unkempt middle aged man, 'альтушка' = alt girl. "
-                            "Output ONLY the English prompt."
-                        )
-                    },
-                    {"role": "user", "content": prompt_for_image}
-                ],
-                max_tokens=150
-            )
-            detailed_prompt = enh_resp.choices[0].message.content.strip()
-        except Exception:
-            detailed_prompt = prompt_for_image
-
-        image_bytes = await generate_image(detailed_prompt)
-        if image_bytes:
-            photo_stream = io.BytesIO(image_bytes)
-            photo_stream.name = "image.jpg"
-            await update.message.reply_photo(photo=photo_stream)
-            return
-        else:
-            await update.message.reply_text("Не получилось сгенерировать, сервер перегружен.")
+    # Логика для групповых чатов
+    if chat_type in ["group", "supergroup"]:
+        addressed = await is_addressed_to_bot(user_text, bot_username)
+        if not addressed and random.random() < 0.85:
+            logger.info("🤫 Сообщение проигнорировано (фильтр группового чата).")
             return
 
-    msg_content = f"{user_name}: {user_text}" if user_text else f"{user_name}: [ПРИСЛАЛ ФОТО]"
-    chat_histories[chat_id].append({"role": "user", "content": msg_content})
-    
-    if len(chat_histories[chat_id]) > 14:
-        system_prompt = chat_histories[chat_id][0]
-        recent_msgs = chat_histories[chat_id][-13:]
-        chat_histories[chat_id] = [system_prompt] + recent_msgs
-
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
-    # Сборка долговременной памяти
-    known_users_context = []
-    if user_id_str in user_cache["users"]:
-        u_data = user_cache["users"][user_id_str]
-        known_users_context.append({
-            "name": u_data["name"],
-            "real_facts": u_data["facts"]
-        })
-
-    # Поиск информации
-    search_context = ""
-    if not base64_image:
-        needs_search_keywords = ["кто", "что", "знаешь", "найди", "загугли", "гугл", "инфа", "расскажи про"]
-        should_search = any(kw in lower_text for kw in needs_search_keywords) or len(user_text.split()) <= 3
-
-        if should_search:
-            search_context = search_web_tavily(user_text)
-
-    messages_to_send = list(chat_histories[chat_id])
-    messages_to_send[0] = {
-        "role": "system",
-        "content": (
-            chat_histories[chat_id][0]["content"] +
-            f"\n[ДОЛГОВРЕМЕННАЯ ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ]: {json.dumps(known_users_context, ensure_ascii=False)}\n" +
-            (f"\n[ДАННЫЕ ИЗ ПОИСКА]: {search_context}" if search_context else "")
-        )
-    }
-
-    active_model = TEXT_MODEL
-    if base64_image:
-        active_model = VISION_MODEL
-        prompt_text = user_text if user_text else "Опиши, что на этой картинке."
-        messages_to_send[-1] = {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"{user_name} прикрепил фото с текстом: {prompt_text}"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}"
-                    }
-                }
-            ]
-        }
-
+    # Генерация ответа через Groq
     try:
-        response = groq_client.chat.completions.create(
-            model=active_model,
-            messages=messages_to_send,
-            max_tokens=400,
-            temperature=0.25,
+        logger.info("🔄 Отправка запроса к Groq API...")
+        completion = client.chat.completions.create(
+            model="llama-3.1-70b-versatile",
+            messages=[
+                {"role": "system", "content": PANTHER_SYSTEM_PROMPT},
+                {"role": "user", "content": f"{user_name}: {user_text}"}
+            ],
+            temperature=0.8,
+            max_tokens=300
         )
-        reply_text = response.choices[0].message.content
+        reply_text = completion.choices[0].message.content
+        logger.info("📤 Ответ от Groq успешно получен.")
         
-        if reply_text:
-            reply_text = reply_text.replace("*", "")
-            chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
-        else:
-            reply_text = "Что-то процессор перегрелся, не понял запрос."
-    except Exception as e:
-        logger.error(f"Ошибка Groq API: {e}")
-        reply_text = "Сервер временно недоступен."
-
-    try:
         await update.message.reply_text(reply_text)
     except Exception as e:
-        logger.error(f"Ошибка отправки Telegram: {e}")
+        logger.error(f"❌ Ошибка при обращении к Groq API: {e}")
+        # Запасной вариант, если ИИ упал
+        await update.message.reply_text("Связь херовая, браток... Повтори-ка.")
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"📥 Команда /start от {update.effective_user.id}")
+    await update.message.reply_text("Здорово. Пантера на связи. Чё надо?")
+
+# Заглушка для веб-сервера Render, чтобы порт был занят
+async def health_check(request):
+    return web.Response(text="Pantera Bot is alive and running!")
+
+async def web_server(application):
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get(f"/{TOKEN}", health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"🌐 Web server started on port {PORT}")
 
 def main():
-    if not TELEGRAM_TOKEN or not GROQ_API_KEY:
-        logger.error("Токены не заданы! Проверь переменные окружения.")
-        return
+    logger.info("Запуск бота через Webhook...")
+    
+    application = Application.builder().token(TOKEN).build()
 
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
+    # Регистрация хендлеров
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    port = int(os.environ.get("PORT", 10000))
-    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    # Настройка webhook для Render
+    if RENDER_EXTERNAL_URL:
+        webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{TOKEN}"
+        logger.info(f"Установка webhook на URL: {webhook_url}")
+        
+        # Запуск фонового веб-сервера aiohttp и телеграм приложения
+        async def post_init(app_instance):
+            await web_server(app_instance)
+            await app_instance.bot.set_webhook(url=webhook_url)
 
-    if not render_url:
-        logger.error("Переменная RENDER_EXTERNAL_URL не задана в настройках Render!")
-        return
-
-    logger.info(f"Запуск бота через Webhook на порту {port}...")
-
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        webhook_url=f"{render_url}/{TELEGRAM_TOKEN}"
-    )
-
+        application.post_init = post_init
+        
+        # Запуск приложения в режиме webhook (polling=False)
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TOKEN,
+            webhook_url=webhook_url
+        )
+    else:
+        logger.warning("⚠️ RENDER_EXTERNAL_URL не задан! Запуск в режиме Polling (локально).")
+        application.run_polling()
 
 if __name__ == "__main__":
     main()
