@@ -83,7 +83,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    user_name = update.effective_user.first_name or "Чел"
+    user_name = update.effective_user.first_name or "Пользователь"
     chat_type = update.message.chat.type
 
     user_text = update.message.text or update.message.caption or ""
@@ -128,19 +128,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(photo=photo_stream)
             return
         else:
-            await update.message.reply_text("Не получилось сгенерировать картинку.")
+            await update.message.reply_text("Не получилось сгенерировать картинку, сервер не отвечает.")
             return
 
-    # Инициализация истории чата
+    # Инициализация истории чата (Умный системный промпт)
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ты — крутой, расслабленный собеседник и товарищ по чату. Общайся естественно, живо, поддерживай беседу с интересом, "
-                    "улавливай вайб, подмечай детали и рассуждай так, как общался бы умный живой человек. "
-                    "Не скатывайся в роботоподобные отчеты и сухие ответы. Разрешено ирония, размышления вслух, ассоциации и свой стиль. "
-                    "НИКОГДА не используй символы разметки вроде звездочек (** или *) для выделения текста — пиши обычным плоским текстом."
+                    "Ты — умный, проницательный и адекватный ИИ-собеседник. Твоя задача — общаться естественно, "
+                    "как живой, эрудированный человек. Ты умеешь поддерживать диалог, шутить, рассуждать и помогать по делу. "
+                    "Подстраивайся под вайб чата. Не будь занудным роботом, не пиши огромные скучные тексты без причины, "
+                    "но и не скатывайся в бред. Если тебе дают информацию из поиска, используй её грамотно. "
+                    "НИКОГДА не используй символы вроде звездочек (** или *) для выделения текста — пиши обычным текстом."
                 )
             }
         ]
@@ -153,7 +154,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_histories[chat_id].append({"role": "user", "content": msg_content})
     
-    # Безопасное ограничение длины истории
+    # Безопасное ограничение длины истории (сохраняем контекст, не ломая бота)
     if len(chat_histories[chat_id]) > 14:
         system_prompt = chat_histories[chat_id][0]
         recent_msgs = chat_histories[chat_id][-13:]
@@ -171,6 +172,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
+    # Проверка: нужен ли поиск в интернете (ИСПРАВЛЕНА СКОБКА ЗДЕСЬ)
     try:
         check_resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -179,49 +181,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 {"role": "user", "content": user_text}
             ],
             max_tokens=5
-        ]
+        ) # <- Вот тут была квадратная скобка ']', из-за которой всё падало. Теперь круглая ')'.
+        
         decision = check_resp.choices[0].message.content.strip().upper()
         if "YES" in decision:
             search_result = search_web(user_text)
             if search_result:
                 chat_histories[chat_id].append({
                     "role": "system", 
-                    "content": f"Информация из интернета по запросу:\n{search_result}"
+                    "content": f"Свежая информация из интернета, используй её для ответа:\n{search_result}"
                 })
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Ошибка при попытке поиска: {e}")
 
+    # Генерация финального ответа
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=chat_histories[chat_id],
             max_tokens=400,
-            temperature=0.75, 
+            temperature=0.75, # Хороший баланс между логикой и креативностью
         )
         reply_text = response.choices[0].message.content
         
         if reply_text:
             chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
         else:
-            reply_text = "тут"
+            reply_text = "Я тут, но что-то сбилось в мыслях."
     except Exception as e:
-        logger.error(f"Groq error: {e}")
-        reply_text = "ошибка сети"
+        logger.error(f"Ошибка Groq API: {e}")
+        reply_text = "Ошибка сети, не могу связаться с мозгом."
 
     try:
         await update.message.reply_text(reply_text)
     except Exception as e:
-        logger.error(f"Telegram send error: {e}")
+        logger.error(f"Ошибка отправки Telegram: {e}")
 
 
 def main():
     if not TELEGRAM_TOKEN or not GROQ_API_KEY:
-        logger.error("Токены не заданы!")
+        logger.error("Токены не заданы! Проверь переменные окружения.")
         return
 
+    # Запуск веб-сервера для Render
     server_thread = Thread(target=run_web_server, daemon=True)
     server_thread.start()
 
+    # Запуск бота
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     application.run_polling()
