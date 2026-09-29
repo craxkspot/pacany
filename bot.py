@@ -33,8 +33,8 @@ groq_client = OpenAI(
 
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
-TEXT_MODEL = "llama-3.1-70b-versatile"
-ARBITER_MODEL = "llama-3.1-8b-instant"
+# Твои оригинальные модели
+TEXT_MODEL = "qwen/qwen3.8-27b"
 VISION_MODEL = "llama-3.2-11b-vision-preview"
 
 CACHE_FILE = "user_cache.json"
@@ -117,7 +117,7 @@ async def extract_and_verify_fact(text: str, author_name: str) -> str | None:
     )
     try:
         response = groq_client.chat.completions.create(
-            model=ARBITER_MODEL,
+            model=TEXT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=50,
             temperature=0.1
@@ -142,12 +142,12 @@ async def is_addressed_to_bot(user_text: str, chat_history: list) -> bool:
     prompt = (
         f"История чата:\n{recent_context}\n\n"
         f"Новое сообщение: \"{user_text}\"\n"
-        "Вопрос: Является ли это новое сообщение продолжением диалога с ИИ-ботом по имени Пантера или обращением к нему (даже косвенным, обсуждением его слов или действий)?\n"
+        "Вопрос: Является ли это новое сообщение продолжением диалога с ИИ-ботом по имени Пантера или обращением к нему (даже косвенным)?\n"
         "Ответь строго одним словом: YES или NO."
     )
     try:
         response = groq_client.chat.completions.create(
-            model=ARBITER_MODEL,
+            model=TEXT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=5,
             temperature=0.0
@@ -177,7 +177,7 @@ async def generate_image(prompt: str) -> bytes | None:
                 if response.status_code == 200 and len(response.content) > 10000:
                     return response.content
             except Exception:
-                logger.warning(f"Таймаут или ошибка генерации, переключаем модель...")
+                logger.warning("Таймаут или ошибка генерации, переключаем модель...")
     return None
 
 
@@ -186,14 +186,16 @@ def search_web_tavily(query: str) -> str:
     if not tavily_client:
         return ""
     
+    # Очищаем запрос от обращения к боту и знаков препинания
     clean_query = re.sub(
-        r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найди|загугли|гугл|найди)\b', 
+        r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найди|загугли|гугл)\b|[^\w\s]', 
         '', 
         query
     ).strip()
     
-    if not clean_query:
-        clean_query = query
+    # Если остался короткий мусор (меньше 3 символов), поиск не вызываем
+    if len(clean_query) < 3:
+        return ""
 
     try:
         response = tavily_client.search(query=clean_query, search_depth="basic", max_results=3)
@@ -268,7 +270,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             enh_resp = groq_client.chat.completions.create(
-                model=ARBITER_MODEL,
+                model=TEXT_MODEL,
                 messages=[
                     {
                         "role": "system", 
@@ -302,12 +304,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {
                 "role": "system", 
                 "content": (
-                    "Ты — Пантера, полезный, умный и адекватный ИИ-ассистент в Telegram-чате. "
-                    "Отвечай вежливо, по делу, без фальшивого пафоса, сленга и ролевой игры. "
+                    "Ты — адекватный, живой ИИ-собеседник. Ты подстраиваешься под вайб чата. "
                     "ПРАВИЛА:\n"
                     "1. Используй факты о пользователях из переданного JSON контекста, если они уместны.\n"
-                    "2. Не придумывай лишней конспирологии.\n"
-                    "3. Пиши обычным текстом без звездочек и Markdown."
+                    "2. Не придумывай лишней конспирологии, понимай сленг (например 'ЗБС' — это сокращение от 'заебись' / круто).\n"
+                    "3. Пиши ТОЛЬКО обычным плоским текстом без звездочек и Markdown."
                 )
             }
         ]
@@ -329,7 +330,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         has_direct_keyword = "пантера" in lower_text or base64_image is not None
         recent_bot_activity = (chat_id in last_bot_message_time) and (time.time() - last_bot_message_time[chat_id] < 30)
 
-        # Если нет прямого упоминания или реплая — проверяем через ИИ-арбитр
         if not is_reply_to_bot and not has_direct_keyword:
             ai_thinks_for_us = await is_addressed_to_bot(user_text, chat_histories[chat_id])
             if not ai_thinks_for_us and not recent_bot_activity and random.random() < 0.88:
@@ -350,7 +350,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     search_context = ""
     if not base64_image:
         needs_search_keywords = ["кто", "что", "знаешь", "найди", "загугли", "гугл", "инфа", "расскажи про"]
-        should_search = any(kw in lower_text for kw in needs_search_keywords) or len(user_text.split()) <= 3
+        should_search = any(kw in lower_text for kw in needs_search_keywords)
 
         if should_search:
             search_context = search_web_tavily(user_text)
