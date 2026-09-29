@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-TARGET_USERNAME = "soult0ken"
+TARGET_USERNAME = "soult0ken" # Вернешь потом, когда закончим тест
 AUDIO_MODEL = "whisper-large-v3-turbo"
 
 # --- НАСТРОЙКИ ВЕРОЯТНОСТЕЙ ---
-TARGET_ROAST_CHANCE = 0.30  # 30% шанс жестко подколоть Валеру
+TARGET_ROAST_CHANCE = 0.50  # Поставил 50% на время теста, чтобы чаще триггерилось
 GLOBAL_ROAST_CHANCE = 0.05  # 5% шанс написать "я валера" остальным
 
 groq_client = OpenAI(
@@ -163,21 +163,21 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
 
 
 # --- НОРМАЛЬНЫЙ ЕДКИЙ ТРОЛЛИНГ ТЕКСТА/ГС ---
-async def generate_text_roast(valera_text: str) -> str:
+async def generate_text_roast(user_text: str) -> str:
     if not groq_client:
-        return "Валера, ну что за хуйню ты опять высрал."
+        return "Ну что за хуйню ты опять высрал."
 
     system_prompt = (
         "Ты — токсичный и дерзкий тип из пацанского чата. Твоя задача — жестко, понятно и с матом "
-        "опустить Валеру за то, что он написал или сказал. Никакого бреда, шизофрении и поэзии.\n"
+        "опустить собеседника за то, что он написал или сказал. Никакого бреда, шизофрении и поэзии.\n"
         "ПРАВИЛА:\n"
         "1. Пиши понятным языком, без абстрактных метафор и галлюцинаций.\n"
         "2. Используй живой мат и нормальный сленг, можно высказаться на пару предложений, если есть что сказать.\n"
-        "3. Бей по фактам, высмеивай его тупость или стиль общения.\n"
+        "3. Бей по фактам, высмеивай тупость или стиль общения.\n"
         "4. Без звездочек, без Markdown, заканчивай мысль точкой."
     )
 
-    user_content = f"Валера сказал: \"{valera_text}\"" if valera_text else "Валера прислал какую-то хуйню без звука."
+    user_content = f"Собеседник сказал: \"{user_text}\"" if user_text else "Собеседник прислал какую-то хуйню без звука."
 
     try:
         response = groq_client.chat.completions.create(
@@ -190,28 +190,28 @@ async def generate_text_roast(valera_text: str) -> str:
             temperature=0.7
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Валера, блять, даже нейросеть твой бред не осилила."
+        return reply if reply else "Блять, даже нейросеть твой бред не осилила."
     except Exception as e:
         logger.error(f"Ошибка текстовой генерации: {e}")
-        return "Валера, твои мысли сломали бота нахуй."
+        return "Твои мысли сломали бота нахуй."
 
 
 # --- НОРМАЛЬНЫЙ ЕДКИЙ ТРОЛЛИНГ КАРТИНОК И ВИДЕО ---
 async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
     if not groq_client:
-        return "Валера, у меня медиа твоё не прогрузилось, но уверен — там полная параша."
+        return "Медиа твоё не прогрузилось, но уверен — там полная параша."
 
     try:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
         prompt_text = (
-            "Посмотри на это изображение или кружок, который прислал Валера. "
+            "Посмотри на это изображение или кружок, который тебе прислали. "
             "Жестко, с матом и понятным сарказмом прокомментируй это. "
             "Говори нормально, без шизофрении и стихов, можно развернуто на 2-3 предложения. "
             "Без звездочек и Markdown, завершай точкой."
         )
         if caption:
-            prompt_text += f" Подпись Валеры: \"{caption}\"."
+            prompt_text += f" Подпись: \"{caption}\"."
 
         response = groq_client.chat.completions.create(
             model=VISION_MODEL,
@@ -233,22 +233,22 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
             temperature=0.7
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Валера, ну и кал ты скинул, пиздец."
+        return reply if reply else "Ну и кал ты скинул, пиздец."
     except Exception as e:
         logger.error(f"Ошибка Vision API: {e}")
-        return "Валера, у нейросети глаза кровят от твоей медиа-хуйни."
+        return "У нейросети глаза кровят от твоей медиа-хуйни."
 
 
 # --- КОМАНДА /ping ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
-            "🤖 **Валера-Бот (Токсик-мод) на связи!**\n\n"
-            f"• Статус ИИ: ✅ Готов душить\n"
+            "🤖 **Валера-Бот (Тестовый режим для всех) на связи!**\n\n"
+            f"• Статус ИИ: ✅ Готов душить всех\n"
             f"• Текст: `{TEXT_MODEL}`\n"
             f"• Фото/Кружки: `{VISION_MODEL}`\n"
             f"• ГС: `{AUDIO_MODEL}`\n"
-            f"• Жертва: @{TARGET_USERNAME} ({TARGET_ROAST_CHANCE*100}%)"
+            f"• Шанс ответа: `{TARGET_ROAST_CHANCE*100}%`"
         )
         await update.message.reply_text(status_msg, parse_mode="Markdown")
 
@@ -286,7 +286,7 @@ def print_startup_status_table() -> bool:
 ├──────────────────────┬─────────────────────────────────────────────────┤
 │ TELEGRAM_TOKEN       │ {tg_ok:<47} │
 │ GROQ_API_KEY         │ {key_ok:<47} │
-│ Жертва (Target)      │ @{TARGET_USERNAME:<46} │
+│ Режим теста          │ ВСЕ ПОЛЬЗОВАТЕЛИ (ВРЕМЕННО)                     │
 │ Текстовая модель     │ {TEXT_MODEL:<47} │
 │ Зрячая модель (Фото) │ {VISION_MODEL:<47} │
 │ Модель Whisper (ГС)  │ {AUDIO_MODEL:<47} │
@@ -298,13 +298,14 @@ def print_startup_status_table() -> bool:
     return is_working and bool(TELEGRAM_TOKEN)
 
 
-# --- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ---
+# --- ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ (ТЕСТОВЫЙ РЕЖИМ ДЛЯ ВСЕХ) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.from_user:
         return
 
     user = update.message.from_user
-    username = user.username.lower() if user.username else ""
+    if user.is_bot:
+        return
 
     # 1. ГЛОБАЛЬНЫЙ ШАНС (написать "я валера" на ЛЮБОЕ сообщение в чате)
     if random.random() < GLOBAL_ROAST_CHANCE:
@@ -313,66 +314,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(valera_phrase)
         return
 
-    # 2. ПЕРСОНАЛЬНЫЙ ШАНС: жестко душить Валеру (@soult0ken)
-    if username == TARGET_USERNAME:
-        if random.random() < TARGET_ROAST_CHANCE:
-            logger.info(f"🎯 Жесткий троллинг сработал на Валеру ({TARGET_ROAST_CHANCE*100}%)!")
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    # 2. ТЕСТОВЫЙ ШАНС ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ
+    if random.random() < TARGET_ROAST_CHANCE:
+        logger.info(f"🎯 Тестовый троллинг сработал на пользователя @{user.username or user.first_name}!")
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-            roast_text = ""
+        roast_text = ""
 
-            # А) Если Валера прислал фото
-            if update.message.photo:
-                try:
-                    photo_file = await update.message.photo[-1].get_file()
-                    photo_bytes = await photo_file.download_as_bytearray()
-                    caption = update.message.caption or ""
-                    logger.info("🖼 Скачиваем картинку Валеры для разноса...")
-                    roast_text = await generate_image_roast(bytes(photo_bytes), caption)
-                except Exception as e:
-                    logger.error(f"Не удалось обработать фото Валеры: {e}")
-                    roast_text = "Валера, твоя пикча даже не грузится, такая же бесполезная, как и ты."
+        # А) Если прислали фото
+        if update.message.photo:
+            try:
+                photo_file = await update.message.photo[-1].get_file()
+                photo_bytes = await photo_file.download_as_bytearray()
+                caption = update.message.caption or ""
+                logger.info("🖼 Скачиваем картинку для разноса...")
+                roast_text = await generate_image_roast(bytes(photo_bytes), caption)
+            except Exception as e:
+                logger.error(f"Не удалось обработать фото: {e}")
+                roast_text = "Твоя пикча даже не грузится, такая же бесполезная."
 
-            # Б) Если Валера прислал видео-кружок (video_note)
-            elif update.message.video_note:
-                try:
-                    video_file = await update.message.video_note.get_file()
-                    logger.info("🎥 Скачиваем видео-кружок Валеры для разноса...")
+        # Б) Если прислали видео-кружок (video_note)
+        elif update.message.video_note:
+            try:
+                video_file = await update.message.video_note.get_file()
+                logger.info("🎥 Скачиваем видео-кружок для разноса...")
+                
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_video:
+                    temp_video_path = temp_video.name
+                
+                await video_file.download_to_drive(temp_video_path)
+                
+                with open(temp_video_path, "rb") as f:
+                    video_bytes = f.read()
                     
-                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_video:
-                        temp_video_path = temp_video.name
-                    
-                    await video_file.download_to_drive(temp_video_path)
-                    
-                    with open(temp_video_path, "rb") as f:
-                        video_bytes = f.read()
-                        
-                    os.unlink(temp_video_path)
-                    
-                    roast_text = await generate_image_roast(video_bytes, "Видео-кружок от Валеры")
-                except Exception as e:
-                    logger.error(f"Не удалось обработать видео-кружок Валеры: {e}")
-                    roast_text = "Валера, твой ебучий кружок даже нейросеть открывать отказалась."
+                os.unlink(temp_video_path)
+                
+                roast_text = await generate_image_roast(video_bytes, "Видео-кружок")
+            except Exception as e:
+                logger.error(f"Не удалось обработать видео-кружок: {e}")
+                roast_text = "Твой ебучий кружок даже нейросеть открывать отказалась."
 
-            # В) Если Валера прислал голосовое сообщение
-            elif update.message.voice:
-                try:
-                    voice_file = await update.message.voice.get_file()
-                    voice_bytes = await voice_file.download_as_bytearray()
-                    valera_text = await transcribe_voice(bytes(voice_bytes))
-                    logger.info(f"🎙 Расшифрованная голосовуха Валеры: '{valera_text}'")
-                    roast_text = await generate_text_roast(valera_text)
-                except Exception as e:
-                    logger.error(f"Не удалось скачать или расшифровать ГС: {e}")
-                    roast_text = "Валера, ты даже голосовуху нормально записать не в состоянии, лузер."
+        # В) Если прислали голосовое сообщение
+        elif update.message.voice:
+            try:
+                voice_file = await update.message.voice.get_file()
+                voice_bytes = await voice_file.download_as_bytearray()
+                user_text = await transcribe_voice(bytes(voice_bytes))
+                logger.info(f"🎙 Расшифрованная голосовуха: '{user_text}'")
+                roast_text = await generate_text_roast(user_text)
+            except Exception as e:
+                logger.error(f"Не удалось скачать или расшифровать ГС: {e}")
+                roast_text = "Ты даже голосовуху нормально записать не в состоянии, лузер."
 
-            # Г) Если Валера написал обычный текст или прислал подпись
-            elif update.message.text or update.message.caption:
-                valera_text = update.message.text or update.message.caption or ""
-                roast_text = await generate_text_roast(valera_text)
+        # Г) Если написали обычный текст или прислали подпись
+        elif update.message.text or update.message.caption:
+            user_text = update.message.text or update.message.caption or ""
+            roast_text = await generate_text_roast(user_text)
 
-            if roast_text:
-                await update.message.reply_text(roast_text)
+        if roast_text:
+            await update.message.reply_text(roast_text)
 
 
 def main():
@@ -388,7 +388,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Токсичный Валера-бот запущен и ждет жертву...")
+    logger.info("🤖 Тестовый Валера-бот запущен...")
     
     application.run_polling(drop_pending_updates=True)
 
