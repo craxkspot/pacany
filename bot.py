@@ -3,6 +3,7 @@ import random
 import logging
 import io
 import re
+import base64
 import urllib.parse
 import httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -27,7 +28,9 @@ groq_client = OpenAI(
     api_key=GROQ_API_KEY
 )
 
-GROQ_MODEL = "qwen/qwen3.8-27b"
+TEXT_MODEL = "qwen/qwen3.8-27b"
+VISION_MODEL = "llama-3.2-11b-vision-preview"  # Бесплатная модель с поддержкой зрения на Groq
+
 chat_histories = {}
 
 
@@ -52,25 +55,30 @@ def run_web_server():
 
 
 async def generate_image(prompt: str) -> bytes | None:
-    """Генерация картинок через Pollinations Flux"""
+    """Бесплатная генерация картинки через Pollinations с каскадным фоллбэком"""
     encoded_prompt = urllib.parse.quote(prompt)
     seed = random.randint(1, 1000000)
-    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=flux"
     
-    async with httpx.AsyncClient(timeout=90.0, follow_redirects=True) as client:
-        try:
-            response = await client.get(image_url)
-            if response.status_code == 200:
-                return response.content
-            else:
-                logger.error(f"Ошибка от сервера картинок: {response.status_code}")
-        except Exception as e:
-            logger.error(f"Ошибка генерации картинки: {e}")
+    # Резервная цепочка моделей Pollinations
+    urls = [
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=flux",
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=turbo",
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&seed={seed}"
+    ]
+
+    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+        for url in urls:
+            try:
+                response = await client.get(url)
+                if response.status_code == 200 and len(response.content) > 5000:
+                    return response.content
+            except Exception as e:
+                logger.warning(f"Ошибка запроса к Pollinations ({url}): {e}")
     return None
 
 
 def search_web(query: str) -> str:
-    """Поиск в интернете через DuckDuckGo"""
+    """Поиск в интернете через DuckDuckGo с очисткой поискового запроса"""
     clean_query = re.sub(
         r'(?i)\b(пантера|pantera|ты знаешь|кто такой|кто такая|что за|расскажи про|найти|загугли|гугл)\b', 
         '', 
@@ -91,7 +99,7 @@ def search_web(query: str) -> str:
 
 
 def is_image_request(text: str) -> bool:
-    """Проверка запроса на генерацию изображения"""
+    """Проверка, запрашивает ли пользователь генерацию картинки"""
     keywords = [
         "нарисуй", "сделай картинку", "сгенерируй", "создай изображение", 
         "сделай фото", "замути", "отрисуй", "покажи", "изобрази", "запили фотку", "запили картинку"
@@ -110,15 +118,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text or update.message.caption or ""
     lower_text = user_text.lower()
 
-    image_url = None
+    # 1. ОБРАБОТКА И ВЫКАЧИВАНИЕ ИЗОБРАЖЕНИЯ (ЕСЛИ ПРИСЛАНО В ЧАТ)
+    base64_image = None
     if update.message.photo:
-        photo_file = await update.message.photo[-1].get_file()
-        image_url = photo_file.file_path
+        try:
+            photo_file = await update.message.photo[-1].get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            base64_image = base64.b64encode(photo_bytes).decode('utf-8')
+        except Exception as e:
+            logger.error(f"Ошибка скачивания картинки из Telegram: {e}")
 
-    if not user_text and not image_url:
+    if not user_text and not base64_image:
         return
 
-    # 1. ГЕНЕРАЦИЯ КАРТИНОК
+    # 2. ГЕНЕРАЦИЯ КАРТИНОК ПО ЗАПРОСУ
     if is_image_request(lower_text):
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         
@@ -133,29 +146,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not prompt_for_image:
             prompt_for_image = user_text
 
-        # Промпт-инжиниринг с жестким распределением объектов по планам
         try:
             enh_resp = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
+                model=TEXT_MODEL,
                 messages=[
                     {
                         "role": "system", 
                         "content": (
-                            "You are an expert prompt engineer for AI image generators (Flux/Stable Diffusion). "
-                            "Translate the user's request into a descriptive English prompt with clear composition: "
-                            "1. Foreground/Subject: Describe main characters or actions. "
-                            "2. Midground/Background: Describe structures, yurts, buildings, environment. "
-                            "3. Specific Attachments: Clearly state if flags/symbols are attached TO specific objects (e.g. 'an American flag mounted on the side of a Kazakh yurt'). "
-                            "Understand Russian gaming and meme slang ('пудж' = Pudge Dota 2, 'скуф' = sloppy middle-aged man, 'альтушка' = alt girl). "
-                            "Output ONLY the English prompt text."
+                            "You are an expert prompt engineer for AI image generators. "
+                            "Translate the request into a detailed English prompt with background, objects, and framing details. "
+                            "Output ONLY the English prompt."
                         )
                     },
                     {"role": "user", "content": prompt_for_image}
                 ],
-                max_tokens=180
+                max_tokens=150
             )
             detailed_prompt = enh_resp.choices[0].message.content.strip()
-            logger.info(f"Сгенерированный промпт для картинки: {detailed_prompt}")
         except Exception:
             detailed_prompt = prompt_for_image
 
@@ -166,33 +173,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_photo(photo=photo_stream)
             return
         else:
-            await update.message.reply_text("Сервер генерации сейчас перегружен, попробуй еще раз.")
+            await update.message.reply_text("Сервер генерации перегружен, попробуй позже.")
             return
 
-    # 2. ИНИЦИАЛИЗАЦИЯ ИСТОРИИ ЧАТА
+    # 3. ИНИЦИАЛИЗАЦИЯ ИСТОРИИ ЧАТА
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
                 "role": "system", 
                 "content": (
-                    "Ты — адекватный, живой ИИ-собеседник. Ты общаешься естественно, подстраиваешься под вайб чата, понимаешь сленг и иронию.\n"
-                    "ПРАВИЛА ОТВЕТА:\n"
-                    "1. Если в запросе или результатах поиска нет информации про человека, никнейм или место — ЧЕСТНО скажи, что не знаешь.\n"
-                    "2. СТРОГО ЗАПРЕЩЕНО выдумывать фейковые биографии людей и вымышленные факты.\n"
-                    "3. Никогда не говори 'я не могу гуглить' или 'у меня нет сети'. Поиск работает автоматически.\n"
-                    "4. Пиши ТОЛЬКО обычным плоским текстом без звездочек и разметки."
+                    "Ты — адекватный, живой ИИ-собеседник. Ты общаешься естественно, подстраиваешься под вайб чата.\n"
+                    "ПРАВИЛА:\n"
+                    "1. Если информации о человеке, никнейме или месте нет — ЧЕСТНО скажи, что не знаешь.\n"
+                    "2. СТРОГО ЗАПРЕЩЕНО выдумывать биографии людей, фильмы и вымышленные факты.\n"
+                    "3. Никогда не говори 'я не могу гуглить' или 'у меня нет доступа в сеть'.\n"
+                    "4. Пиши ТОЛЬКО обычным плоским текстом без звездочек и Markdown."
                 )
             }
         ]
 
-    if image_url:
-        msg_content = f"{user_name} прислал картинку. Текст: {user_text}" if user_text else f"{user_name} прислал картинку."
-    else:
-        msg_content = f"{user_name}: {user_text}"
-
-    chat_histories[chat_id].append({"role": "user", "content": msg_content})
+    # Сохраняем текстовое представление в истории
+    history_entry = f"{user_name}: {user_text}" if user_text else f"{user_name}: [Отправил фото]"
+    chat_histories[chat_id].append({"role": "user", "content": history_entry})
     
-    # Ограничение длины истории (сохраняем ровно 1 системный промпт + последние сообщения)
     if len(chat_histories[chat_id]) > 12:
         system_prompt = chat_histories[chat_id][0]
         recent_msgs = chat_histories[chat_id][-11:]
@@ -202,7 +205,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update.message.reply_to_message 
         and update.message.reply_to_message.from_user.id == context.bot.id
     )
-    is_mentioned = "пантера" in lower_text or image_url is not None
+    is_mentioned = "пантера" in lower_text or base64_image is not None
     
     should_random_speak = random.random() < 0.10
     if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not should_random_speak:
@@ -210,34 +213,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # 3. ПОИСК И ПОДГОТОВКА ЗАПРОСА К GROQ
+    # 4. ПОИСК В СЕТИ (ТОЛЬКО ЕСЛИ НЕТ КАРТИНКИ)
     search_context = ""
-    needs_search_keywords = ["кто", "что", "где", "когда", "почему", "знаешь", "знаешь ли", "найди", "инфа", "инфу", "загугли", "гугл"]
-    should_search = any(kw in lower_text for kw in needs_search_keywords) or len(user_text.split()) <= 3
+    if not base64_image:
+        needs_search_keywords = ["кто", "что", "где", "когда", "почему", "знаешь", "найди", "инфа", "загугли", "гугл"]
+        should_search = any(kw in lower_text for kw in needs_search_keywords) or len(user_text.split()) <= 3
 
-    if should_search:
-        search_result = search_web(user_text)
-        if search_result:
-            search_context = f"\n\n[ДАННЫЕ ИЗ ПОИСКА В ИНТЕРНЕТЕ]:\n{search_result}"
-        else:
-            search_context = "\n\n[ДАННЫЕ ИЗ ПОИСКА]: Информация в сети не найдена. Если не знаешь ответа — честно скажи об этом."
+        if should_search:
+            search_result = search_web(user_text)
+            if search_result:
+                search_context = f"\n\n[ДАННЫЕ ИЗ ПОИСКА В ИНТЕРНЕТЕ]:\n{search_result}"
+            else:
+                search_context = "\n\n[ДАННЫЕ ИЗ ПОИСКА]: Информация не найдена. Если не знаешь ответа — честно скажи об этом."
 
-    # Собираем временный массив сообщений для отправки в API (чтобы не портить роли в истории)
+    # Собираем контекст для запроса
     messages_to_send = list(chat_histories[chat_id])
     if search_context:
-        # Внедряем результаты поиска строго в системный промпт (индекс 0)
         messages_to_send[0] = {
             "role": "system",
             "content": chat_histories[chat_id][0]["content"] + search_context
         }
 
-    # 4. ГЕНЕРАЦИЯ ОТВЕТА
+    # ВЫБОР МОДЕЛИ: Если есть фото — переключаемся на Vision модель
+    active_model = TEXT_MODEL
+    if base64_image:
+        active_model = VISION_MODEL
+        # Подготавливаем текущий запрос с картинкой
+        image_content = []
+        prompt_text = user_text if user_text else "Опиши, что изображено на этом фото."
+        image_content.append({"type": "text", "text": f"{user_name}: {prompt_text}"})
+        image_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+        })
+        messages_to_send[-1] = {"role": "user", "content": image_content}
+
+    # 5. ГЕНЕРАЦИЯ ОТВЕТА
     try:
         response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=active_model,
             messages=messages_to_send,
             max_tokens=400,
-            temperature=0.6,
+            temperature=0.2, # Низкая температура от галлюцинаций
         )
         reply_text = response.choices[0].message.content
         
@@ -245,9 +262,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_text = reply_text.replace("*", "")
             chat_histories[chat_id].append({"role": "assistant", "content": reply_text})
         else:
-            reply_text = "Не совсем понял запрос, повтори еще раз."
+            reply_text = "Не совсем понял, повтори еще раз."
     except Exception as e:
-        logger.error(f"Ошибка Groq API: {e}")
+        logger.error(f"Ошибка Groq API ({active_model}): {e}")
         reply_text = "Сервер временно недоступен."
 
     try:
