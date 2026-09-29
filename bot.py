@@ -108,7 +108,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not prompt_for_image:
             prompt_for_image = user_text
 
-        # Просим модель перевести и развернуть запрос для генератора
         try:
             enh_resp = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
@@ -117,7 +116,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"role": "user", "content": prompt_for_image}
                 ],
                 max_tokens=100
-            ]
+            )
             detailed_prompt = enh_resp.choices[0].message.content.strip()
         except Exception:
             detailed_prompt = prompt_for_image
@@ -146,9 +145,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
         ]
 
+    # Безопасное формирование контента сообщения
     if image_url:
+        caption_text = f"{user_name}: {user_text}" if user_text else f"{user_name} прислал картинку."
         user_content = [
-            {"type": "text", "text": f"{user_name}: {user_text}" if user_text else f"{user_name} прислал картинку."},
+            {"type": "text", "text": caption_text},
             {"type": "image_url", "image_url": {"url": image_url}}
         ]
     else:
@@ -165,14 +166,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     is_mentioned = "пантера" in lower_text or image_url is not None
     
-    # Рандомные реплики в группах
     should_random_speak = random.random() < 0.10
     if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not should_random_speak:
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Спросим у модели: нужен ли поиск в интернете для этого сообщения?
     try:
         check_resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -193,7 +192,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # Генерация ответа
     try:
         response = groq_client.chat.completions.create(
             model=GROQ_MODEL,
