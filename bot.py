@@ -29,7 +29,7 @@ groq_client = OpenAI(
 ) if GROQ_API_KEY else None
 
 
-# --- АВТОМАТИЧЕСКИЙ ПОДБОР ТЕКСТОВОЙ И ЗРЯЧЕЙ МОДЕЛЕЙ ---
+# --- АВТОМАТИЧЕСКИЙ ПОДБОР ТЕКСТОВОЙ (LLAMA/QWEN) И ЗРЯЧЕЙ МОДЕЛЕЙ ---
 def get_active_models() -> tuple[str, str]:
     default_text = "llama-3.1-8b-instant"
     default_vision = "llama-3.2-11b-vision-preview"
@@ -41,40 +41,34 @@ def get_active_models() -> tuple[str, str]:
         models_data = groq_client.models.list().data
         available_ids = [m.id for m in models_data]
 
-        # 1. Отбираем исключительно разговорные текстовые модели
-        chat_models = [
-            m_id for m_id in available_ids
-            if not any(bad in m_id.lower() for bad in ["whisper", "vision", "guard", "embed", "safetensors"])
-        ]
+        # 1. Приоритетный список разговорных текстовых моделей (с учетом Qwen)
         priority_text = [
             "llama-3.3-70b-versatile",
+            "qwen-2.5-32b",
+            "qwen-2.5-72b",
+            "qwen2.5-72b-instruct",
             "llama-3.1-8b-instant",
             "llama3-8b-8192",
             "gemma2-9b-it"
         ]
+
         selected_text = default_text
         for model in priority_text:
-            if model in chat_models:
+            if model in available_ids:
                 selected_text = model
                 break
-        else:
-            if chat_models:
-                selected_text = chat_models[0]
 
-        # 2. Отбираем модель с поддержкой зрения (Vision)
-        vision_models = [m_id for m_id in available_ids if "vision" in m_id.lower() and "guard" not in m_id.lower()]
+        # 2. Приоритетный список модели с поддержкой зрения (Vision)
         priority_vision = [
             "llama-3.2-11b-vision-preview",
             "llama-3.2-90b-vision-preview"
         ]
+
         selected_vision = default_vision
         for model in priority_vision:
-            if model in vision_models:
+            if model in available_ids:
                 selected_vision = model
                 break
-        else:
-            if vision_models:
-                selected_vision = vision_models[0]
 
         return selected_text, selected_vision
 
@@ -85,7 +79,7 @@ def get_active_models() -> tuple[str, str]:
 
 TEXT_MODEL, VISION_MODEL = get_active_models()
 
-# Внезапные реплики для глобального 5% шанса
+# Фразы для глобального 5% шанса в чате
 VALERA_IMPERSONATIONS = [
     "я валера",
     "я валера и я одобряю этот бред",
@@ -222,13 +216,16 @@ def print_startup_status_table() -> bool:
         try:
             res = groq_client.chat.completions.create(
                 model=TEXT_MODEL,
-                messages=[{"role": "user", "content": "Скажи ОК"}],
-                max_tokens=5,
+                messages=[{"role": "user", "content": "Скажи коротко ОК"}],
+                max_tokens=10,
                 temperature=0.1
             )
             test_response = res.choices[0].message.content.strip()
-            text_status = "✅ РАБОТАЕТ"
-            is_working = True
+            if test_response:
+                text_status = "✅ РАБОТАЕТ"
+                is_working = True
+            else:
+                test_response = "Пустой ответ модели"
         except Exception as e:
             text_status = "❌ ОШИБКА API"
             test_response = str(e)
@@ -317,10 +314,9 @@ def main():
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Слушаем абсолютно все входящие сообщения (текст, фото, ГС, стикеры)
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Бот запущен, зрение подключено, слушает чат...")
+    logger.info("🤖 Бот запущен, слушает чат...")
     
     application.run_polling(drop_pending_updates=True)
 
