@@ -38,57 +38,37 @@ client = OpenAI(
 chat_histories = defaultdict(lambda: deque(maxlen=50))
 
 
-# --- АВТОМАТИЧЕСКИЙ ПОИСК ЛУЧШИХ БЕСПЛАТНЫХ МОДЕЛЕЙ ---
-def get_active_models() -> tuple[str, str, str]:
-    selected_text, selected_vision, selected_audio = None, None, None
-
+# --- АВТОМАТИЧЕСКИЙ СБОР ПУЛА МОДЕЛЕЙ ---
+def get_fallback_pool() -> list[str]:
+    """Собирает список доступных бесплатных моделей с OpenRouter"""
+    default_pool = [
+        "meta-llama/llama-3.1-8b-instruct:free",
+        "google/gemma-2-9b-it:free",
+        "mistralai/mistral-7b-instruct:free",
+        "deepseek/deepseek-chat:free"
+    ]
+    
     if not client:
-        return "meta-llama/llama-3.1-8b-instruct:free", "meta-llama/llama-3.1-8b-instruct:free", None
+        return default_pool
 
     try:
-        logger.info("🔍 Запрашиваем список доступных моделей с OpenRouter...")
+        logger.info("🔍 Сканируем доступные бесплатные модели с OpenRouter...")
         models_data = client.models.list().data
-        available_ids = [m.id for m in models_data]
-        logger.info(f"Всего доступно моделей: {len(available_ids)}")
-
-        # Ищем бесплатные модели (с суффиксом :free)
-        free_models = [m for m in available_ids if ":free" in m.lower()]
+        free_models = [m.id for m in models_data if ":free" in m.lower() and not any(w in m.lower() for w in ["embed", "tts", "audio"])]
         
-        # Стоп-слова для отсеивания служебного мусора
-        bad_words = ["embed", "tts", "guard", "safeguard", "audio", "code", "coder", "math"]
-
-        # 1. Текстовая модель (адекватная и умная)
-        text_candidates = [m for m in free_models if not any(bw in m.lower() for bw in bad_words) and "vision" not in m.lower()]
-        if text_candidates:
-            # Приоритет отдаем Llama или Gemma, если они есть
-            preferred = [m for m in text_candidates if "llama" in m.lower() or "gemma" in m.lower()]
-            selected_text = preferred[0] if preferred else text_candidates[0]
-
-        # 2. Модель со зрением (Vision)
-        vision_candidates = [m for m in free_models if ("vision" in m.lower() or "vl" in m.lower() or "qwen" in m.lower()) and not any(bw in m.lower() for bw in bad_words)]
-        if vision_candidates:
-            selected_vision = vision_candidates[0]
-        else:
-            selected_vision = selected_text  # Фоллбэк на текст
-
-        # 3. Аудиомодель (если есть в бесплатных)
-        audio_candidates = [m for m in free_models if "whisper" in m.lower() or "audio" in m.lower()]
-        if audio_candidates:
-            selected_audio = audio_candidates[0]
-
+        if free_models:
+            # Ставим Llama или Gemma на первые места, если они есть
+            sorted_models = sorted(free_models, key=lambda x: 0 if "llama" in x.lower() or "gemma" in x.lower() else 1)
+            logger.info(f"Найдено бесплатных моделей для пула: {len(sorted_models)}")
+            return sorted_models[:10]  длина пула для перебора
     except Exception as e:
-        logger.error(f"❌ Ошибка автоподбора моделей: {e}")
+        logger.error(f"Не удалось подтянуть список моделей динамически: {e}")
 
-    # Финальные фоллбэки, если автоподбор не сработал
-    fallback_text = "meta-llama/llama-3.1-8b-instruct:free"
-    return (
-        selected_text or fallback_text,
-        selected_vision or selected_text or fallback_text,
-        selected_audio
-    )
+    return default_pool
 
-
-TEXT_MODEL, VISION_MODEL, AUDIO_MODEL = get_active_models()
+# Глобальный пул для ротации
+MODEL_POOL = get_fallback_pool()
+PRIMARY_TEXT_MODEL = MODEL_POOL[0] if MODEL_POOL else "meta-llama/llama-3.1-8b-instruct:free"
 
 
 # --- ПОИСК В ИНТЕРНЕТЕ ---
@@ -140,7 +120,7 @@ def run_web_server():
     HTTPServer(("0.0.0.0", port), HealthCheckHandler).serve_forever()
 
 
-# --- ГЕНЕРАТОР ТЕКСТА ---
+# --- УМНЫЙ ГЕНЕРАТОР ТЕКСТА С АВТОРОТАЦИЕЙ МОДЕЛЕЙ (ОБХОД 429/404) ---
 async def generate_text_roast(chat_id: int, sender_username: str, user_text: str) -> str:
     if not client:
         return "мозги отключены, нет апи ключа"
@@ -166,38 +146,41 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
     messages.extend(list(chat_histories[chat_id]))
     messages.append({"role": "user", "content": user_text})
 
-    try:
-        logger.info(f"Отправляем запрос в модель {TEXT_MODEL}...")
-        response = client.chat.completions.create(
-            model=TEXT_MODEL, messages=messages, max_tokens=300, temperature=0.7
-        )
-        
-        choice = response.choices[0]
-        reply = choice.message.content if choice.message and choice.message.content else ""
-        reply = reply.replace("*", "").strip()
+    # Перебираем модели из пула, пока какая-нибудь не ответит успешно (обход лимитов)
+    global MODEL_POOL
+    for model_name in MODEL_POOL:
+        try:
+            logger.info(f"Пробуем модель: {model_name}...")
+            response = client.chat.completions.create(
+                model=model_name, messages=messages, max_tokens=300, temperature=0.7
+            )
+            
+            choice = response.choices[0]
+            reply = choice.message.content if choice.message and choice.message.content else ""
+            reply = reply.replace("*", "").strip()
 
-        if not reply:
-            logger.error(f"❌ Модель {TEXT_MODEL} вернула пустой контент! Finish reason: {choice.finish_reason}")
-            return "у меня пустой бак, модель прислала пустоту"
+            if not reply:
+                continue
 
-        if reply.endswith("."):
-            reply = reply[:-1]
-        reply = reply.lower()
+            if reply.endswith("."):
+                reply = reply[:-1]
+            reply = reply.lower()
 
-        chat_histories[chat_id].append({"role": "user", "content": user_text})
-        chat_histories[chat_id].append({"role": "assistant", "content": reply})
-        return reply
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка API при генерации текста: {e}", exc_info=True)
-        return "у меня словесный понос, апи лагает"
+            chat_histories[chat_id].append({"role": "user", "content": user_text})
+            chat_histories[chat_id].append({"role": "assistant", "content": reply})
+            logger.info(f"✅ Успешно ответила модель: {model_name}")
+            return reply
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Модель {model_name} отрыгнула ошибку: {e}. Пробуем следующую...")
+            continue
+
+    logger.error("❌ Все модели из пула исчерпали лимиты или недоступны!")
+    return "у меня словесный понос, все апишки легли в лимиты"
 
 
 # --- ОБРАБОТЧИК КАРТИНОК И СТИКЕРОВ ---
 async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: bytes, caption: str, media_type: str) -> str:
-    if not client or not VISION_MODEL:
-        return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но у меня нет зрячей модели]")
-
     try:
         image = Image.open(io.BytesIO(image_bytes))
         if image.mode in ("RGBA", "P"):
@@ -225,39 +208,40 @@ async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: 
             ]
         })
 
-        logger.info(f"Отправляем изображение в модель {VISION_MODEL}...")
-        response = client.chat.completions.create(
-            model=VISION_MODEL, messages=messages, max_tokens=200, temperature=0.7
-        )
-        
-        choice = response.choices[0]
-        reply = choice.message.content if choice.message and choice.message.content else ""
-        reply = reply.replace("*", "").strip().lower()
+        # Пробуем отправить картинку по моделям из пула (если модель поддерживает Vision)
+        for model_name in MODEL_POOL:
+            try:
+                logger.info(f"Пробуем vision-запрос на модели: {model_name}...")
+                response = client.chat.completions.create(
+                    model=model_name, messages=messages, max_tokens=200, temperature=0.7
+                )
+                choice = response.choices[0]
+                reply = choice.message.content if choice.message and choice.message.content else ""
+                if reply:
+                    reply = reply.replace("*", "").strip().lower()
+                    if reply.endswith("."):
+                        reply = reply[:-1]
+                    chat_histories[chat_id].append({"role": "user", "content": f"[скинул {media_type}] {caption}"})
+                    chat_histories[chat_id].append({"role": "assistant", "content": reply})
+                    return reply
+            except Exception:
+                continue
 
-        if not reply:
-            return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но модель вернула пустоту]")
-
-        if reply.endswith("."):
-            reply = reply[:-1]
-        
-        chat_histories[chat_id].append({"role": "user", "content": f"[скинул {media_type}] {caption}"})
-        chat_histories[chat_id].append({"role": "assistant", "content": reply})
-        return reply
-        
     except Exception as e:
-        logger.error(f"❌ Ошибка Vision API при обработке {media_type}: {e}", exc_info=True)
-        return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но зрячая модель не справилась]")
+        logger.error(f"Ошибка обработки картинки: {e}")
+
+    # Если зрячие модели упали или не поддержали картинку — падаем на обычный текстовый роаст
+    return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_type}, но я ослеп, разнеси текстом]")
 
 
 # --- КОМАНДА PING ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
-            "🤖 **Валера (Auto-Model OpenRouter) на связи!**\n\n"
+            "🤖 **Валера (Auto-Rotation Pool) на связи!**\n\n"
             f"• Папочка: `{MASTER_USERNAME}` ✅\n"
-            f"• Текст: `{TEXT_MODEL}`\n"
-            f"• Зрение: `{VISION_MODEL}`\n"
-            f"• Слух: `{AUDIO_MODEL or 'текстовый фолбэк'}`\n"
+            f"• Активных моделей в ротации: `{len(MODEL_POOL)}`\n"
+            f"• Основная модель: `{PRIMARY_TEXT_MODEL}`\n"
             f"• Память: `50 сообщений`"
         )
         await update.message.reply_text(status_msg, parse_mode="Markdown")
@@ -266,11 +250,10 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def print_startup_status_table() -> bool:
     table_log = f"""
 ┌────────────────────────────────────────────────────────────────────────┐
-│         ОТЧЕТ О ЗАПУСКЕ ВАЛЕРЫ (АВТОПОДБОР МОДЕЛЕЙ)                    │
+│         ОТЧЕТ О ЗАПУСКЕ ВАЛЕРЫ (РОТАЦИЯ ПУЛА МОДЕЛЕЙ)                  │
 ├──────────────────────┬─────────────────────────────────────────────────┤
-│ Текстовая модель     │ {TEXT_MODEL:<47} │
-│ Зрячая модель        │ {VISION_MODEL:<47} │
-│ Аудиомодель          │ {str(AUDIO_MODEL):<47} │
+│ Основная модель      │ {PRIMARY_TEXT_MODEL:<47} │
+│ Доступно в ротации   │ {str(len(MODEL_POOL)) + " моделей с автопереключением":<47} │
 └──────────────────────┴─────────────────────────────────────────────────┘
 """
     logger.info(table_log)
@@ -361,7 +344,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Валера с автоподбором моделей запущен!")
+    logger.info("🤖 Валера с ротацией моделей запущен!")
     application.run_polling(drop_pending_updates=True)
 
 
