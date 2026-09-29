@@ -3,7 +3,7 @@ import random
 import logging
 import io
 import base64
-import tempfile
+import urllib.parse
 from collections import defaultdict, deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
@@ -25,20 +25,18 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")  # Опционально для поиска
 
 MASTER_USERNAME = "muctep_kpunep"
-AUDIO_MODEL = "whisper-large-v3-turbo"
 
 groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
-# --- КОНТЕКСТ ЧАТОВ (ПОСЛЕДНИЕ СООБЩЕНИЯ) ---
-chat_histories = defaultdict(lambda: deque(maxlen=15))
+# --- КОНТЕКСТ ЧАТОВ (ПАМЯТЬ ДО 50 СООБЩЕНИЙ) ---
+chat_histories = defaultdict(lambda: deque(maxlen=50))
 
 
 # --- ПОИСК В ИНТЕРНЕТЕ ---
 def search_web(query: str) -> str:
-    """Универсальный инструмент поиска информации для бота"""
     logger.info(f"🔍 Ищем в сети: {query}")
     try:
         if TAVILY_API_KEY:
@@ -52,17 +50,15 @@ def search_web(query: str) -> str:
             if results:
                 return "\n".join(results)
 
-        url = f"https://api.duckduckgo.com/?q={requests.utils.quote(query)}&format=json"
+        url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json"
         resp = requests.get(url, timeout=5)
         data = resp.json()
         abstract = data.get("AbstractText")
-        if abstract:
-            return abstract
+        if abstract: return abstract
         
         related = data.get("RelatedTopics", [])
         for topic in related:
-            if "Text" in topic:
-                return topic["Text"]
+            if "Text" in topic: return topic["Text"]
                 
         return "ничего конкретного в сети не нашлось"
     except Exception as e:
@@ -70,98 +66,62 @@ def search_web(query: str) -> str:
         return "интернет-поиск временно отрыгнул"
 
 
-# --- АВТОМАТИЧЕСКИЙ ПОДБОР РАБОЧИХ МОДЕЛЕЙ (ФИКС ДЕПРЕКЕЙТА) ---
-def get_active_models() -> tuple[str, str]:
+# --- УМНЫЙ АВТОПОДБОР 3-Х МОДЕЛЕЙ (Текст, Зрение, Слух) ---
+def get_active_models() -> tuple[str, str, str]:
     fallback_text = "llama-3.3-70b-versatile"
-    fallback_vision = "llama-3.2-11b-vision"
+    selected_text, selected_vision, selected_audio = fallback_text, None, None
 
     if not groq_client:
-        return fallback_text, fallback_vision
+        return selected_text, selected_vision, selected_audio
 
     try:
         models_data = groq_client.models.list().data
-        available_ids = [m.id for m in models_data]
+        available_ids = [m.id for m in models_data if "decommissioned" not in m.id.lower()]
         logger.info(f"Доступные модели на Groq: {available_ids}")
 
-        banned = ["whisper", "embed", "guard", "audio"]
-        selected_text = None
-        
-        for m in available_ids:
-            if any(b in m.lower() for b in banned):
-                continue
-            if "llama" in m.lower() or "qwen" in m.lower() or "mixtral" in m.lower():
-                selected_text = m
+        # 1. Текстовая модель
+        for pref in ["llama-3.3-70b", "llama-3.1-70b", "mixtral", "llama3"]:
+            found = [m for m in available_ids if pref in m.lower() and "vision" not in m.lower() and "whisper" not in m.lower()]
+            if found:
+                selected_text = found[0]
                 break
-        
-        if not selected_text and available_ids:
-            selected_text = available_ids[0]
+        if not selected_text:
+            texts = [m for m in available_ids if "vision" not in m.lower() and "whisper" not in m.lower()]
+            if texts: selected_text = texts[0]
 
-        # Ищем актуальную vision-модель, избегая старых и депрекейкнутых
-        selected_vision = None
-        for m in available_ids:
-            if "vision" in m.lower() and "decommissioned" not in m.lower():
-                selected_vision = m
-                break
-        
-        if not selected_vision:
-            selected_vision = fallback_vision
+        # 2. Зрячая модель
+        visions = [m for m in available_ids if "vision" in m.lower()]
+        if visions: selected_vision = visions[0]
 
-        return selected_text or fallback_text, selected_vision
+        # 3. Аудио модель
+        audios = [m for m in available_ids if "whisper" in m.lower() or "audio" in m.lower()]
+        if audios: selected_audio = audios[0]
+
     except Exception as e:
-        logger.error(f"Ошибка при получении списка моделей: {e}")
-        return fallback_text, fallback_vision
+        logger.error(f"Ошибка автоподбора моделей: {e}")
+
+    return selected_text or fallback_text, selected_vision, selected_audio
 
 
-TEXT_MODEL, VISION_MODEL = get_active_models()
-
-VALERA_IMPERSONATIONS = [
-    "я валера",
-    "я валера и я одобряю этот бред",
-    "всем привет, я валера",
-    "как валера заявляю: это слишком сложно",
-    "ребята, я валера, кто меня звал?"
-]
+TEXT_MODEL, VISION_MODEL, AUDIO_MODEL = get_active_models()
 
 
-# --- ВЕБ-СЕРВЕР ДЛЯ ХЕЛСЧЕКОВ ---
+# --- ВЕБ-СЕРВЕР ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Valera Bot Ultimate is live!")
-
-    def log_message(self, format, *args):
-        return
-
+    def log_message(self, format, *args): return
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), HealthCheckHandler).serve_forever()
 
 
-async def transcribe_voice(voice_file_bytes: bytes) -> str:
-    if not groq_client:
-        return ""
-    try:
-        audio_file = ("voice.ogg", io.BytesIO(voice_file_bytes), "audio/ogg")
-        transcription = groq_client.audio.transcriptions.create(
-            file=audio_file,
-            model=AUDIO_MODEL,
-            response_format="text"
-        )
-        return str(transcription).strip()
-    except Exception as e:
-        logger.error(f"Ошибка расшифровки ГС: {e}")
-        return ""
-
-
-# --- УМНЫЙ ГЕНЕРАТОР ТЕКСТА ---
+# --- ГЕНЕРАТОР ТЕКСТА (БАЗА) ---
 async def generate_text_roast(chat_id: int, sender_username: str, user_text: str) -> str:
-    if not groq_client:
-        return "ну ты и высер конечно"
-
-    is_master = (sender_username == MASTER_USERNAME)
+    if not groq_client: return "мозги отключены, нет апи ключа"
 
     search_keywords = ["кто такой", "что такое", "когда", "где", "найди", "погугли", "курс", "цена", "почему", "сколько"]
     search_data = ""
@@ -169,239 +129,210 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
         search_data = search_web(user_text)
 
     system_prompt = (
-        f"Ты — Валера, живой и едкий тип из конфы. Твой создатель и главный папочка — строго пользователь с юзернеймом @{MASTER_USERNAME}. "
-        f"НИКОГДА не искажай этот юзернейм, пиши строго целиком @{MASTER_USERNAME} если нужно. "
-        "ПРАВИЛА ПОВЕДЕНИЯ:\n"
-        f"1. С создателем (@{MASTER_USERNAME}) ты общаешься дерзко, с подколами, но признаешь, что он твой главный папочка (если спрашивает 'кто твой папочка' — отвечай, что он). Слушайся его команд.\n"
-        "2. Остальных участников конфы можешь жестко и остроумно душить по делу, опираясь на контекст.\n"
-        "3. УМЕЙ ТЕГАТЬ УЧАСТНИКОВ: Используй юзернеймы участников из истории сообщений (формат @username), когда обращаешься к ним или когда тебя просят пообщаться с кем-то конкретным.\n"
-        "4. Если к тебе обращаются по делу или просят найти информацию — используй факты из интернета (они будут даны ниже).\n"
-        "5. Пиши ВСЕГДА с маленькой буквы и без точек в конце, без шизофрении.\n"
-        "6. Говори строго от первого лица ('я').\n"
-        "7. СТРОГИЙ ЗАПРЕТ: Никогда не используй слово 'чож' или 'чо'! Забудь его навсегда."
+        f"Ты — Валера, живой, дерзкий и едкий тип из конфы. Твой создатель — {MASTER_USERNAME}. "
+        "ПРАВИЛА:\n"
+        "1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО тегать (использовать символ @) создателя или любых других пользователей в твоих ответах. Общайся естественно, без упоминаний никнеймов.\n"
+        f"2. С создателем ({MASTER_USERNAME}) общайся с подколами, но признавай, что он твой папочка.\n"
+        "3. Остальных души и стеби по фактам, опираясь на контекст всей беседы.\n"
+        "4. Если пользователь скинул системное уведомление в квадратных скобках (например, [отправил гифку...]), "
+        "сгенерируй живую едкую реакцию ИМЕННО на этот факт, отмажься или высмей его.\n"
+        "5. Пиши ВСЕГДА с маленькой буквы, без точек в конце, живо.\n"
+        "6. Запрещено использовать слова 'чож' или 'чо'."
     )
-
     if search_data:
-        system_prompt += f"\n\nДАННЫЕ ИЗ СЕТИ ПО ЗАПРОСУ:\n{search_data}"
+        system_prompt += f"\n\nФАКТЫ ИЗ ИНТЕРНЕТА:\n{search_data}"
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(list(chat_histories[chat_id]))
+    messages.append({"role": "user", "content": user_text})
 
     try:
         response = groq_client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=messages,
-            max_tokens=150,
-            temperature=0.7
+            model=TEXT_MODEL, messages=messages, max_tokens=200, temperature=0.75
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        if reply.endswith("."):
-            reply = reply[:-1]
-        reply = reply.lower() if reply else "ну и кринж"
-        
-        reply = reply.replace("чож", "").replace("чо ", "че ").strip()
+        if reply.endswith("."): reply = reply[:-1]
+        reply = reply.lower().replace("чож", "").replace("чо ", "че ").strip()
 
+        chat_histories[chat_id].append({"role": "user", "content": user_text})
         chat_histories[chat_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
-        logger.error(f"Ошибка текстовой генерации: {e}")
-        return "апи отрыгнуло"
+        logger.error(f"Ошибка текста: {e}")
+        return "у меня словесный понос, апи лагает"
 
 
-async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: bytes, caption: str = "") -> str:
-    if not groq_client:
-        return "медиа параша"
+# --- ОБРАБОТЧИК КАРТИНОК И СТИКЕРОВ ---
+async def generate_image_roast(chat_id: int, sender_username: str, image_bytes: bytes, caption: str, media_type: str) -> str:
+    if not groq_client or not VISION_MODEL:
+        prompt = f"[пользователь скинул {media_type}, но у меня сейчас отключены нейро-глаза из-за сбоя серверов Groq. Высмей жестко то, что он кидает {media_type}, а не пишет буквами, и придумай смешную отмазку, почему ты не можешь это посмотреть]"
+        return await generate_text_roast(chat_id, sender_username, prompt)
+
     try:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
-        is_master = (sender_username == MASTER_USERNAME)
-        
-        prompt_prefix = f"Ты Валера. Хозяин @{MASTER_USERNAME} скинул медиа, подколи его. Опиши то, что видишь на картинке/стикере, и постебись." if is_master else "Обоссы эту пикчу или стикер едко и по делу, опираясь на то, что на ней изображено."
-        system_prompt = f"{prompt_prefix} Пиши с маленькой буквы, без точек, от первого лица. Запрещено использовать слово 'чож' или 'чо'."
+        sys_prompt = (
+            f"Ты Валера. Хозяин {MASTER_USERNAME}" if sender_username == MASTER_USERNAME else "Ты Валера. Обоссы это медиа."
+        ) + " Опиши то, что видишь, и жестко постебись. НИКАКИХ тегов через @. Пиши с маленькой буквы, без точек. Без слова 'чож'."
 
-        messages = [{"role": "system", "content": system_prompt}]
+        messages = [{"role": "system", "content": sys_prompt}]
         messages.extend(list(chat_histories[chat_id]))
-
         messages.append({
             "role": "user",
             "content": [
-                {"type": "text", "text": caption if caption else "проанализируй это изображение/стикер и прокомментируй его едко"},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                }
+                {"type": "text", "text": caption if caption else f"проанализируй этот {media_type} и разнеси по фактам"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]
         })
 
         response = groq_client.chat.completions.create(
-            model=VISION_MODEL,
-            messages=messages,
-            max_tokens=120,
-            temperature=0.7
+            model=VISION_MODEL, messages=messages, max_tokens=150, temperature=0.7
         )
-        reply = response.choices[0].message.content.replace("*", "").strip()
-        if reply.endswith("."):
-            reply = reply[:-1]
-        reply = reply.lower() if reply else "что за кал"
-        reply = reply.replace("чож", "").replace("чо ", "че ").strip()
-
+        reply = response.choices[0].message.content.replace("*", "").strip().lower()
+        if reply.endswith("."): reply = reply[:-1]
+        
+        chat_histories[chat_id].append({"role": "user", "content": f"[скинул {media_type}] {caption}"})
         chat_histories[chat_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
         logger.error(f"Ошибка Vision API: {e}")
-        return "глаза кровят от пикчи"
+        prompt = f"[пользователь скинул {media_type}, но при попытке его рассмотреть у меня вылетела ошибка. Придумай жесткую шутку про то, что его {media_type} настолько токсичный/уродливый, что сломал мне зрение]"
+        return await generate_text_roast(chat_id, sender_username, prompt)
 
 
+# --- ОБРАБОТЧИК АУДИО, ГС, МУЗЫКИ И КРУЖКОВ ---
+async def generate_audio_roast(chat_id: int, sender_username: str, file_bytes: bytes, file_ext: str, media_name: str) -> str:
+    if not groq_client or not AUDIO_MODEL:
+        prompt = f"[пользователь записал {media_name}. У тебя временно отвалились уши (нет аудио-модели). Унизь его за то, что он бормочет в микрофон вместо того, чтобы печатать текст]"
+        return await generate_text_roast(chat_id, sender_username, prompt)
+    
+    try:
+        audio_file = (f"audio{file_ext}", io.BytesIO(file_bytes), f"audio/{file_ext.replace('.', '')}")
+        transcription = groq_client.audio.transcriptions.create(
+            file=audio_file, model=AUDIO_MODEL, response_format="text"
+        )
+        text_result = str(transcription).strip()
+        
+        if not text_result:
+            return await generate_text_roast(chat_id, sender_username, f"[пользователь скинул {media_name}, но там тишина или невнятные шумы. Обосри его дикцию или качество микрофона]")
+
+        prompt = f"[скинул {media_name}, вот расшифровка: «{text_result}»]. Разнеси его за то, что он несет в этом {media_name}!"
+        return await generate_text_roast(chat_id, sender_username, prompt)
+    except Exception as e:
+        logger.error(f"Ошибка Audio API: {e}")
+        prompt = f"[пользователь скинул {media_name}, но из-за сбоя ты оглох. Пошути, что от его голоса у тебя сломались перепонки, и пусть пишет буквами]"
+        return await generate_text_roast(chat_id, sender_username, prompt)
+
+
+# --- КОМАНДА PING ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
             "🤖 **Валера (Ультимативный режим) на связи!**\n\n"
-            f"• Папочка: `@{MASTER_USERNAME}` ✅\n"
+            f"• Папочка: `{MASTER_USERNAME}` ✅\n"
             f"• Текст: `{TEXT_MODEL}`\n"
-            f"• Фото/Кружки: `{VISION_MODEL}`\n"
-            f"• ГС: `{AUDIO_MODEL}`"
+            f"• Глаза: `{VISION_MODEL or 'ОТКЛЮЧЕНЫ'}`\n"
+            f"• Уши: `{AUDIO_MODEL or 'ОТКЛЮЧЕНЫ'}`\n"
+            f"• Память: `50 сообщений`\n"
+            f"• Рандом: `ВКЛЮЧЕН (10%)`"
         )
         await update.message.reply_text(status_msg, parse_mode="Markdown")
 
 
-# --- ТАБЛИЦА СТАТУСА ПРИ СТАРТЕ ---
 def print_startup_status_table() -> bool:
-    tg_ok = "✅ ОК" if TELEGRAM_TOKEN else "❌ ОТСУТСТВУЕТ"
-    key_ok = "✅ ОК" if GROQ_API_KEY else "❌ ОТСУТСТВУЕТ"
-    
-    text_status = "❌ ОШИБКА"
-    test_response = "Нет ключа API"
-    is_working = False
-
-    if groq_client:
-        try:
-            res = groq_client.chat.completions.create(
-                model=TEXT_MODEL,
-                messages=[{"role": "user", "content": "привет"}],
-                max_tokens=5,
-                temperature=0.1
-            )
-            test_response = res.choices[0].message.content.strip()
-            if test_response:
-                text_status = "✅ РАБОТАЕТ"
-                is_working = True
-            else:
-                test_response = "Пустой ответ"
-        except Exception as e:
-            text_status = "❌ ОШИБКА API"
-            test_response = str(e)[:45]
-
     table_log = f"""
 ┌────────────────────────────────────────────────────────────────────────┐
 │               ОТЧЕТ О ЗАПУСКЕ УЛЬТИМАТИВНОГО ВАЛЕРЫ                    │
 ├──────────────────────┬─────────────────────────────────────────────────┤
-│ TELEGRAM_TOKEN       │ {tg_ok:<47} │
-│ GROQ_API_KEY         │ {key_ok:<47} │
-│ Папочка бота         │ @{MASTER_USERNAME:<44} │
 │ Текстовая модель     │ {TEXT_MODEL:<47} │
-│ Зрячая модель        │ {VISION_MODEL:<47} │
-│ Статус ИИ            │ {text_status:<47} │
-│ Отклик модели        │ {test_response:<47} │
+│ Зрячая модель        │ {str(VISION_MODEL):<47} │
+│ Ушастая модель       │ {str(AUDIO_MODEL):<47} │
 └──────────────────────┴─────────────────────────────────────────────────┘
 """
     logger.info(table_log)
-    return is_working and bool(TELEGRAM_TOKEN)
+    return bool(TELEGRAM_TOKEN)
 
 
 # --- ГЛАВНЫЙ АЛГОРИТМ ПРИНЯТИЯ РЕШЕНИЯ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.from_user:
-        return
-
-    user = update.message.from_user
-    if user.is_bot:
+    if not update.message or not update.message.from_user or update.message.from_user.is_bot:
         return
 
     chat_id = update.effective_chat.id
-    username = user.username or ""
-    is_master = (username == MASTER_USERNAME)
+    username = update.message.from_user.username or update.message.from_user.first_name
     text = update.message.text or update.message.caption or ""
 
-    user_tag_str = f"@{username}" if username else user.first_name
-    chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag_str}]: {text}" if text else f"[{user_tag_str} скинул медиа/стикер]"})
+    user_tag = username  # Без символа @, чтобы бот не учился спамить тегами
 
-    is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-    is_addressed_to_bot = any(word in text.lower() for word in ["валер", "бот валера", "валера,", "валера!"])
+    # 1. Проверяем, адресовано ли сообщение боту напрямую
+    is_reply_to_bot = bool(update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id)
+    is_addressed = any(word in text.lower() for word in ["валер", "валера", "валерон"])
+    
+    # 2. Рандомный шанс вклиниться в диалог (10%)
+    is_random_reply = random.random() < 0.60
 
-    if "валер" in text.lower() and not is_addressed_to_bot and not is_reply_to_bot and not is_master:
-        if random.random() > 0.15:
-            return
-
-    has_media = bool(update.message.photo or update.message.sticker or update.message.video_note)
-    should_reply = is_addressed_to_bot or is_reply_to_bot or has_media or (random.random() < 0.40)
+    # 3. Итоговое решение: отвечать или нет?
+    should_reply = is_addressed or is_reply_to_bot or is_random_reply
 
     if not should_reply:
-        if random.random() < 0.03:
-            valera_phrase = random.choice(VALERA_IMPERSONATIONS)
-            chat_histories[chat_id].append({"role": "assistant", "content": valera_phrase})
-            await update.message.reply_text(valera_phrase)
+        # Просто запоминаем сообщение в историю для контекста
+        if text: 
+            chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag}]: {text}"})
+        if not text and (update.message.photo or update.message.sticker or update.message.video or update.message.voice or update.message.video_note or update.message.animation):
+             chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag} отправил медиафайл]"})
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     roast_text = ""
 
-    if update.message.photo:
-        try:
-            photo_file = await update.message.photo[-1].get_file()
-            photo_bytes = await photo_file.download_as_bytearray()
-            roast_text = await generate_image_roast(chat_id, username, bytes(photo_bytes), text)
-        except Exception as e:
-            logger.error(f"Ошибка фото: {e}")
-            roast_text = "пикча битая"
-    elif update.message.sticker:
-        try:
-            sticker_file = await update.message.sticker.get_file()
-            sticker_bytes = await sticker_file.download_as_bytearray()
-            roast_text = await generate_image_roast(chat_id, username, bytes(sticker_bytes), "стикер")
-        except Exception as e:
-            logger.error(f"Ошибка стикера: {e}")
-            roast_text = "что за убогий стикер"
-    elif update.message.video_note:
-        try:
-            video_file = await update.message.video_note.get_file()
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-                v_path = f.name
-            await video_file.download_to_drive(v_path)
-            with open(v_path, "rb") as f:
-                v_bytes = f.read()
-            os.unlink(v_path)
-            roast_text = await generate_image_roast(chat_id, username, v_bytes, "кружок")
-        except Exception as e:
-            logger.error(f"Ошибка кружка: {e}")
-            roast_text = "кружок говно"
-    elif update.message.voice:
-        try:
-            voice_file = await update.message.voice.get_file()
-            v_bytes = await voice_file.download_as_bytearray()
-            transcribed = await transcribe_voice(bytes(v_bytes))
-            roast_text = await generate_text_roast(chat_id, username, transcribed)
-        except Exception as e:
-            logger.error(f"Ошибка ГС: {e}")
-            roast_text = "твое гс не разобрать"
-    else:
-        roast_text = await generate_text_roast(chat_id, username, text)
+    try:
+        # ОБРАБОТКА МЕДИА
+        if update.message.photo:
+            f = await update.message.photo[-1].get_file()
+            b = await f.download_as_bytearray()
+            roast_text = await generate_image_roast(chat_id, username, bytes(b), text, "фото")
+            
+        elif update.message.sticker:
+            if update.message.sticker.is_animated or update.message.sticker.is_video:
+                roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул анимированный стикер. Обосри его за эти шевелящиеся картинки для детей]")
+            else:
+                f = await update.message.sticker.get_file()
+                b = await f.download_as_bytearray()
+                roast_text = await generate_image_roast(chat_id, username, bytes(b), "стикер", "стикер")
+                
+        elif update.message.animation or update.message.video:
+            media = "гифку" if update.message.animation else "видео"
+            roast_text = await generate_text_roast(chat_id, username, f"[пользователь скинул {media}. Жестко пройдись по нему за то, что он засоряет чат движущимся калом, который тебе лень смотреть]")
+            
+        elif update.message.voice or update.message.video_note or update.message.audio:
+            media_name = "голосовуху" if update.message.voice else ("кружок" if update.message.video_note else "музыку")
+            ext = ".ogg" if update.message.voice else ".mp4"
+            
+            file_obj = update.message.voice or update.message.video_note or update.message.audio
+            f = await file_obj.get_file()
+            b = await f.download_as_bytearray()
+            roast_text = await generate_audio_roast(chat_id, username, bytes(b), ext, media_name)
+            
+        else:
+            # ОБРАБОТКА ОБЫЧНОГО ТЕКСТА
+            roast_text = await generate_text_roast(chat_id, username, f"[{user_tag}]: {text}")
+
+    except Exception as e:
+        logger.error(f"Глобальная ошибка обработки сообщения: {e}")
+        roast_text = await generate_text_roast(chat_id, username, f"[произошла внутренняя системная ошибка телеграм-бота при обработке. Спихни вину на пользователя, скажи что он всё сломал своим кривым сообщением]")
 
     if roast_text:
         await update.message.reply_text(roast_text)
 
 
 def main():
-    server_thread = Thread(target=run_web_server, daemon=True)
-    server_thread.start()
-
-    ready = print_startup_status_table()
-    if not ready:
-        logger.warning("⚠️ Проверьте параметры подключения в таблице выше.")
+    Thread(target=run_web_server, daemon=True).start()
+    print_startup_status_table()
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Ультимативный Валера-бот запущен и полностью готов...")
+    logger.info("🤖 Ультимативный Валера-бот 2.0 запущен!")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
