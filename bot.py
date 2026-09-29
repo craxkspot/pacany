@@ -70,7 +70,7 @@ def search_web(query: str) -> str:
         return "интернет-поиск временно отрыгнул"
 
 
-# --- АВТОМАТИЧЕСКИЙ ПОИСК РАБОЧЕЙ МОДЕЛИ (С ФИЛЬТРОМ ОГРАНИЧЕНИЙ) ---
+# --- АВТОМАТИЧЕСКИЙ ПОИСК РАБОЧЕЙ МОДЕЛИ (С РАСШИРЕННЫМ ФИЛЬТРОМ) ---
 def get_active_models() -> tuple[str, str, str]:
     selected_text, selected_vision, selected_audio = None, None, None
 
@@ -82,8 +82,8 @@ def get_active_models() -> tuple[str, str, str]:
         available_ids = [m.id for m in models_data if "decommissioned" not in m.id.lower()]
         logger.info(f"Доступные модели на Groq: {available_ids}")
 
-        # Стоп-слова исключают служебные, аудио и модели с требованиями подтверждения условий (terms acceptance)
-        bad_words = ["whisper", "guard", "safeguard", "audio", "embed", "tts", "orpheus", "arabic", "saudi"]
+        # Стоп-слова исключают служебные, аудио, модели с требованиями условий и капризные openai-модели
+        bad_words = ["whisper", "guard", "safeguard", "audio", "embed", "tts", "orpheus", "arabic", "saudi", "openai"]
 
         # Текстовая модель
         text_candidates = [m for m in available_ids if not any(bw in m.lower() for bw in bad_words) and "vision" not in m.lower()]
@@ -160,8 +160,9 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
     messages.append({"role": "user", "content": user_text})
 
     try:
+        # Увеличили max_tokens до 400, чтобы модель не обрывалась по длине
         response = groq_client.chat.completions.create(
-            model=TEXT_MODEL, messages=messages, max_tokens=200, temperature=0.75
+            model=TEXT_MODEL, messages=messages, max_tokens=400, temperature=0.75
         )
         
         choice = response.choices[0]
