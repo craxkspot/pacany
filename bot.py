@@ -106,6 +106,34 @@ async def extract_and_verify_fact(text: str, author_name: str) -> str | None:
         return None
 
 
+# --- ИИ-АРБИТР КОНТЕКСТА ---
+async def is_addressed_to_bot(user_text: str, chat_history: list) -> bool:
+    """Определяет по контексту, обращаются ли к боту"""
+    if not user_text:
+        return False
+        
+    recent_context = "\n".join([msg.get("content", "") for msg in chat_history[-3:]])
+    
+    prompt = (
+        f"История чата:\n{recent_context}\n\n"
+        f"Новое сообщение: \"{user_text}\"\n"
+        "Вопрос: Является ли это новое сообщение продолжением диалога с ИИ-ботом или обращением к нему (даже косвенным, обсуждением его поведения/слов)?\n"
+        "Ответь строго одним словом: YES или NO."
+    )
+    try:
+        response = groq_client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=5,
+            temperature=0.0
+        )
+        answer = response.choices[0].message.content.strip().upper()
+        return "YES" in answer
+    except Exception as e:
+        logger.error(f"Ошибка проверки контекста арбитром: {e}")
+        return False
+
+
 # --- ГЕНЕРАЦИЯ КАРТИНОК С FALLBACK ---
 async def generate_image(prompt: str) -> bytes | None:
     encoded_prompt = urllib.parse.quote(prompt)
@@ -164,7 +192,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
     
-    # Корректное определение имени автора (поддерживает людей и других ботов)
     if update.message.from_user:
         user_name = update.message.from_user.first_name or update.message.from_user.username or "Пользователь"
         user_id_str = str(update.message.from_user.id)
@@ -176,7 +203,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text or update.message.caption or ""
     lower_text = user_text.lower()
 
-    # Сбор фактов о реальных пользователях
+    # Сбор фактов о пользователях
     if update.message.from_user and user_id_str in user_cache["users"]:
         user_cache["users"][user_id_str]["last_interaction"] = update.message.date.isoformat()
         
@@ -188,7 +215,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     save_cache(user_cache)
                     logger.info(f"Записан факт о {user_name}: {verified_fact}")
 
-    # Обработка картинок (Vision)
+    # Обработка картинок (фото или файлы-документы)
     base64_image = None
     if update.message.photo:
         try:
@@ -196,10 +223,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo_bytes = await photo_file.download_as_bytearray()
             base64_image = base64.b64encode(photo_bytes).decode('utf-8')
         except Exception as e:
-            logger.error(f"Ошибка Vision: {e}")
+            logger.error(f"Ошибка загрузки фото: {e}")
+    elif update.message.document:
+        doc = update.message.document
+        if doc.mime_type and doc.mime_type.startswith("image/"):
+            try:
+                doc_file = await doc.get_file()
+                doc_bytes = await doc_file.download_as_bytearray()
+                base64_image = base64.b64encode(doc_bytes).decode('utf-8')
+            except Exception as e:
+                logger.error(f"Ошибка загрузки документа-картинки: {e}")
 
     if not user_text and not base64_image:
         return
+
+    # Оперативная история чата (инициализация)
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = [
+            {
+                "role": "system", 
+                "content": (
+                    "Ты — адекватный, живой ИИ-собеседник. Ты подстраиваешься под вайб чата. "
+                    "ПРАВИЛА:\n"
+                    "1. Используй факты о пользователях из переданного JSON контекста, если они уместны.\n"
+                    "2. Не придумывай лишней конспирологии, понимай сленг (например 'ЗБС' — это сокращение от 'заебись' / круто).\n"
+                    "3. Пиши ТОЛЬКО обычным плоским текстом без звездочек и Markdown."
+                )
+            }
+        ]
+
+    # --- УМНЫЕ УСЛОВИЯ АКТИВАЦИИ В ГРУППЕ ---
+    if chat_type != "private":
+        is_reply_to_bot = (
+            update.message.reply_to_message 
+            and update.message.reply_to_message.from_user.id == context.bot.id
+        )
+        has_direct_keyword = any(kw in lower_text for kw in ["пантера", "pantera", "бот"]) or base64_image is not None
+
+        # Если нет прямого обращения/реплая/картинки, спрашиваем ИИ-арбитра по контексту
+        if not is_reply_to_bot and not has_direct_keyword:
+            ai_thinks_it_is_for_us = await is_addressed_to_bot(user_text, chat_histories[chat_id])
+            if not ai_thinks_it_is_for_us and random.random() < 0.85:
+                return
 
     # Генерация изображений
     if is_image_request(lower_text):
@@ -242,21 +307,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать, сервер перегружен.")
             return
 
-    # Оперативная история чата
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = [
-            {
-                "role": "system", 
-                "content": (
-                    "Ты — адекватный, живой ИИ-собеседник. Ты подстраиваешься под вайб чата. "
-                    "ПРАВИЛА:\n"
-                    "1. Используй факты о пользователях из переданного JSON контекста, если они уместны.\n"
-                    "2. Не придумывай лишней конспирологии, понимай сленг (например 'ЗБС' — это сокращение от 'заебись' / круто).\n"
-                    "3. Пиши ТОЛЬКО обычным плоским текстом без звездочек и Markdown."
-                )
-            }
-        ]
-
     msg_content = f"{user_name}: {user_text}" if user_text else f"{user_name}: [ПРИСЛАЛ ФОТО]"
     chat_histories[chat_id].append({"role": "user", "content": msg_content})
     
@@ -264,16 +314,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = chat_histories[chat_id][0]
         recent_msgs = chat_histories[chat_id][-13:]
         chat_histories[chat_id] = [system_prompt] + recent_msgs
-
-    # Условия активации бота в группе
-    is_reply_to_bot = (
-        update.message.reply_to_message 
-        and update.message.reply_to_message.from_user.id == context.bot.id
-    )
-    is_mentioned = "пантера" in lower_text or base64_image is not None
-
-    if chat_type != "private" and not is_reply_to_bot and not is_mentioned and random.random() < 0.85:
-        return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
@@ -363,7 +403,6 @@ def main():
 
     logger.info(f"Запуск бота через Webhook на порту {port}...")
 
-    # Запуск через встроенный вебхук (заменяет старый polling и ручной HTTP-сервер)
     application.run_webhook(
         listen="0.0.0.0",
         port=port,
