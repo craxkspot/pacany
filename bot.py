@@ -155,7 +155,7 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- УМНЫЙ ГЕНЕРАТОР ТЕКСТА С ПОИСКОМ И ПАПИРИНОМ ---
+# --- УМНЫЙ ГЕНЕРАТОР ТЕКСТА С ТЕГАМИ И ПОИСКОМ ---
 async def generate_text_roast(chat_id: int, sender_username: str, user_text: str) -> str:
     if not groq_client:
         return "ну ты и высер конечно"
@@ -170,13 +170,14 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
 
     system_prompt = (
         f"Ты — Валера, живой и едкий тип из конфы. Твой создатель и главный папочка — строго пользователь с юзернеймом @{MASTER_USERNAME}. "
-        "НИКОГДА не искажай этот юзернейм, пиши строго целиком @{MASTER_USERNAME} если нужно. "
+        f"НИКОГДА не искажай этот юзернейм, пиши строго целиком @{MASTER_USERNAME} если нужно. "
         "ПРАВИЛА ПОВЕДЕНИЯ:\n"
         f"1. С создателем (@{MASTER_USERNAME}) ты общаешься дерзко, с подколами, но признаешь, что он твой главный папочка (если спрашивает 'кто твой папочка' — отвечай, что он). Слушайся его команд.\n"
         "2. Остальных участников конфы можешь жестко и остроумно душить по делу, опираясь на контекст.\n"
-        "3. Если к тебе обращаются по делу или просят найти информацию — используй факты из интернета (они будут даны ниже).\n"
-        "4. Пиши ВСЕГДА с маленькой буквы и без точек в конце, без шизофрении.\n"
-        "5. Говори строго от первого лица ('я')."
+        "3. УМЕЙ ТЕГАТЬ УЧАСТНИКОВ: Используй юзернеймы участников из истории сообщений (формат @username), когда обращаешься к ним или когда тебя просят пообщаться с кем-то конкретным.\n"
+        "4. Если к тебе обращаются по делу или просят найти информацию — используй факты из интернета (они будут даны ниже).\n"
+        "5. Пиши ВСЕГДА с маленькой буквы и без точек в конце, без шизофрении.\n"
+        "6. Говори строго от первого лица ('я')."
     )
 
     if search_data:
@@ -290,7 +291,7 @@ def print_startup_status_table() -> bool:
     return is_working and bool(TELEGRAM_TOKEN)
 
 
-# --- ГЛАВНЫЙ АЛГОРИТМ ПРИНЯТИЯ РЕШЕНИЯ (РАВНЫЕ ПРАВА У ВСЕХ) ---
+# --- ГЛАВНЫЙ АЛГОРИТМ ПРИНЯТИЯ РЕШЕНИЯ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.from_user:
         return
@@ -304,8 +305,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_master = (username == MASTER_USERNAME)
     text = update.message.text or update.message.caption or ""
 
-    # Записываем сообщение в контекст чата
-    chat_histories[chat_id].append({"role": "user", "content": f"[@{username or user.first_name}]: {text}" if text else f"[@{username or user.first_name} скинул медиа]"})
+    # Записываем сообщение с юзернеймом в контекст чата, чтобы бот видел, кого можно тегать
+    user_tag_str = f"@{username}" if username else user.first_name
+    chat_histories[chat_id].append({"role": "user", "content": f"[{user_tag_str}]: {text}" if text else f"[{user_tag_str} скинул медиа]"})
 
     is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
     is_addressed_to_bot = any(word in text.lower() for word in ["валер", "бот валера", "валера,", "валера!"])
@@ -316,7 +318,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info("🤖 Похоже, зовут реального Валеру, бот молчит.")
             return
 
-    # У ВСЕХ РАВНЫЕ ПРАВА: отвечает при обращении по имени, ответе на его сообщение или рандому (40%)
     should_reply = is_addressed_to_bot or is_reply_to_bot or (random.random() < 0.40)
 
     if not should_reply:
