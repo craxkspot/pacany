@@ -108,7 +108,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not prompt_for_image:
             prompt_for_image = user_text
 
-        # Просим модель нормально перевести и развернуть запрос для генератора
+        # Просим модель перевести и развернуть запрос для генератора
         try:
             enh_resp = groq_client.chat.completions.create(
                 model=GROQ_MODEL,
