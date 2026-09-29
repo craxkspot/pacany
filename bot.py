@@ -124,23 +124,27 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- УЛЬТРА-ЖЕСТКИЙ ТРОЛЛИНГ ТЕКСТА/ГС (БЕЗ ШИЗЫ, t=0.2) ---
+# --- ЖИВОЙ СЛЕНГОВЫЙ ТРОЛЛИНГ ТЕКСТА/ГС ---
 async def generate_text_roast(user_text: str) -> str:
     if not groq_client:
-        return "Ну что за хуйню ты опять высрал."
+        return "ну ты и высер конечно"
 
     system_prompt = (
-        "Ты — токсичный гопник из чата. Твоя единственная цель — оскорбить человека и унизить за его слова. "
-        "Говори только короткими, понятными матерными фразами. Никакой философии, никакой шизофрении, никаких умных слов. "
-        "Примеры ответов:\n"
-        "- Ты чё, дурак блять?\n"
-        "- Иди уроки учи, клоун.\n"
-        "- Сказал хуйню и рад, еблан.\n"
-        "- Ты бы рот закрыл, от тебя говном несет.\n"
-        "Отвечай строго 1 предложением, с матом, без звездочек и без Markdown."
+        "ты свой тип из токсичной конфы. твоя задача — остроумно, едко и по факту опустить чела за его слова. "
+        "никакого занудства, никакой морали, никаких 'сам дурак' и никаких 'я не валера'. ты котируешь валеру или сам валера, тебе похуй. "
+        "ПРАВИЛА СТИЛЯ:\n"
+        "1. пиши ВСЕГДА с маленькой буквы и без точек в конце.\n"
+        "2. забивай хуй на знаки препинания, пиши как в телеге на расслабоне.\n"
+        "3. будь язвительным, цепляйся за смысл слов, стеби за тупость или душноту, отвечай в кассу.\n"
+        "4. длина: 1-2 коротких предложения, живой сленг, можно с матом, но без шизофрении.\n"
+        "примеры:\n"
+        "- бля чел хорош хуйню нести\n"
+        "- ты когда это писал сам понял че высрал\n"
+        "- сидит блять из себя умного строит а сам два слова связать не может\n"
+        "- ладно уговорил ты клоун"
     )
 
-    user_content = f"Чел написал: \"{user_text}\"" if user_text else "Чел прислал пустую парашу."
+    user_content = f"чел написал: \"{user_text}\"" if user_text else "чел прислал какую-то пустую хуйню"
 
     try:
         response = groq_client.chat.completions.create(
@@ -149,30 +153,32 @@ async def generate_text_roast(user_text: str) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ],
-            max_tokens=40,
-            temperature=0.2  # Низкая температура убирает бред и шизофрению
+            max_tokens=60,
+            temperature=0.75  # Живой креатив, чтобы базарил как в конфе
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Блять, даже ответить нечего на этот бред."
+        if reply.endswith("."):
+            reply = reply[:-1]
+        return reply.lower() if reply else "ну и кринж ты выдал"
     except Exception as e:
         logger.error(f"Ошибка текстовой генерации: {e}")
-        return "Твои мысли сломали бота нахуй."
+        return "от твоего текста у меня апи упало"
 
 
-# --- УЛЬТРА-ЖЕСТКИЙ ТРОЛЛИНГ КАРТИНОК И ВИДЕО ---
+# --- ЖИВОЙ СЛЕНГОВЫЙ ТРОЛЛИНГ КАРТИНОК И ВИДЕО ---
 async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
     if not groq_client:
-        return "Медиа твоё не прогрузилось, но уверен — там полная параша."
+        return "медиа параша какая-то"
 
     try:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
         prompt_text = (
-            "Посмотри на эту картинку/видео. Обоссы это коротко и с матом, как в пацанском чате. "
-            "Никакой философии, 1 предложение, без звездочек."
+            "посмотри на это. обоссы максимально едко и по-человечески, как в конфе. "
+            "пиши с маленькой буквы, без точек в конце, без дурацких метафор. 1 предложение."
         )
         if caption:
-            prompt_text += f" Подпись: \"{caption}\"."
+            prompt_text += f" подпись к каллу: \"{caption}\"."
 
         response = groq_client.chat.completions.create(
             model=VISION_MODEL,
@@ -190,21 +196,23 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
                     ]
                 }
             ],
-            max_tokens=40,
-            temperature=0.2
+            max_tokens=60,
+            temperature=0.75
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Ну и кал ты скинул, пиздец."
+        if reply.endswith("."):
+            reply = reply[:-1]
+        return reply.lower() if reply else "что за кал ты скинул"
     except Exception as e:
         logger.error(f"Ошибка Vision API: {e}")
-        return "У нейросети глаза кровят от твоей медиа-хуйни."
+        return "глаза кровят от твоей пикчи"
 
 
 # --- КОМАНДА /ping ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
-            "🤖 **Валера-Бот (Автоподбор моделей) на связи!**\n\n"
+            "🤖 **Валера-Бот (Конфный стиль) на связи!**\n\n"
             f"• Статус ИИ: ✅ Готов душить\n"
             f"• Текст: `{TEXT_MODEL}`\n"
             f"• Фото/Кружки: `{VISION_MODEL}`\n"
@@ -227,7 +235,7 @@ def print_startup_status_table() -> bool:
         try:
             res = groq_client.chat.completions.create(
                 model=TEXT_MODEL,
-                messages=[{"role": "user", "content": "OK"}],
+                messages=[{"role": "user", "content": "привет"}],
                 max_tokens=5,
                 temperature=0.1
             )
@@ -290,7 +298,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 roast_text = await generate_image_roast(bytes(photo_bytes), caption)
             except Exception as e:
                 logger.error(f"Не удалось обработать фото: {e}")
-                roast_text = "Твоя пикча даже не грузится, такая же бесполезная."
+                roast_text = "твоя пикча даже не грузится"
 
         # Б) Если прислали видео-кружок (video_note)
         elif update.message.video_note:
@@ -308,10 +316,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                 os.unlink(temp_video_path)
                 
-                roast_text = await generate_image_roast(video_bytes, "Видео-кружок")
+                roast_text = await generate_image_roast(video_bytes, "видео-кружок")
             except Exception as e:
                 logger.error(f"Не удалось обработать видео-кружок: {e}")
-                roast_text = "Твой ебучий кружок даже нейросеть открывать отказалась."
+                roast_text = "твой кружок параша полная"
 
         # В) Если прислали голосовое сообщение
         elif update.message.voice:
@@ -323,7 +331,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 roast_text = await generate_text_roast(user_text)
             except Exception as e:
                 logger.error(f"Не удалось скачать или расшифровать ГС: {e}")
-                roast_text = "Ты даже голосовуху нормально записать не в состоянии, лузер."
+                roast_text = "ты даже голосовуху нормально записать не можешь"
 
         # Г) Если написали обычный текст или прислали подпись
         elif update.message.text or update.message.caption:
@@ -347,7 +355,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Умный Валера-бот запущен...")
+    logger.info("🤖 Валера-бот с вайбом конфы запущен...")
     
     application.run_polling(drop_pending_updates=True)
 
