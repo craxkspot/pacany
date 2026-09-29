@@ -24,8 +24,8 @@ TARGET_USERNAME = "soult0ken"
 AUDIO_MODEL = "whisper-large-v3-turbo"
 
 # --- НАСТРОЙКИ ВЕРОЯТНОСТЕЙ ---
-TARGET_ROAST_CHANCE = 0.30  # 30% шанс подколоть Валеру (0.30 = 30%, 1.0 = 100%)
-GLOBAL_ROAST_CHANCE = 0.05  # 5% шанс написать "я валера" на сообщения других людей
+TARGET_ROAST_CHANCE = 0.30  # 30% шанс жестко подколоть Валеру
+GLOBAL_ROAST_CHANCE = 0.05  # 5% шанс написать "я валера" остальным
 
 groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
@@ -58,7 +58,6 @@ def get_active_models() -> tuple[str, str]:
 
         selected_text = None
         
-        # 1. Проверяем приоритетные разговорные модели
         for model in priority_text:
             if model in available_ids:
                 try:
@@ -74,7 +73,6 @@ def get_active_models() -> tuple[str, str]:
                 except Exception:
                     continue
 
-        # 2. Поиск любой работающей альтернативы
         if not selected_text:
             for m in available_ids:
                 if not any(bad in m.lower() for bad in banned_keywords):
@@ -94,7 +92,6 @@ def get_active_models() -> tuple[str, str]:
         if not selected_text:
             selected_text = fallback_text
 
-        # 3. Подбор Vision-модели
         priority_vision = [
             "llama-3.2-11b-vision-preview",
             "llama-3.2-90b-vision-preview"
@@ -118,7 +115,6 @@ def get_active_models() -> tuple[str, str]:
 
 TEXT_MODEL, VISION_MODEL = get_active_models()
 
-# Фразы для глобального шанса в чате
 VALERA_IMPERSONATIONS = [
     "я валера",
     "я валера и я одобряю этот бред",
@@ -165,23 +161,24 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- ГЕНЕРАЦИЯ ПОДКОЛА ДЛЯ ТЕКСТА/ГС ---
+# --- ЖЕСТКИЙ ТРОЛЛИНГ ТЕКСТА/ГС ---
 async def generate_text_roast(valera_text: str) -> str:
     if not groq_client:
-        return "Валера, ну что за бред ты опять выдал..."
+        return "Валера, ну что за хуйню ты опять высрал..."
 
     system_prompt = (
-        "Ты — саркастичный и язвительный участник Telegram-чата. "
-        "Твоя цель — коротко высмеять или подколоть сообщение пользователя по имени Валера "
-        "(в том числе расшифрованное из его голосового сообщения).\n"
+        "Ты — токсичный, жесткий и абсолютно безжалостный тролль из интернет-чата. "
+        "Твоя цель — жестко и едко опустить пользователя по имени Валера (включая текст из его голосовух), "
+        "используя черный юмор, агрессивный сарказм и мат.\n"
         "ПРАВИЛА:\n"
-        "1. Отвечай коротко (1–2 предложения).\n"
-        "2. Пиши живым разговорным языком, с иронией или сарказмом.\n"
-        "3. Высмеивай именно смысл того, что он сказал/написал.\n"
-        "4. НЕ используй Markdown, звездочки (*) и форматирование."
+        "1. Отвечай коротко, емко и больно (1–2 предложения, без лишней воды и поэм).\n"
+        "2. Общайся как реальный токсичный тип из пацанского или гиковского чата, смело используй мат.\n"
+        "3. Точечно и жестоко высмеивай именно то, что он написал или сказал.\n"
+        "4. НЕ используй Markdown, звездочки (*) и форматирование.\n"
+        "5. ВСЕГДА завершай мысль точкой, не обрывай текст на полуслове."
     )
 
-    user_content = f"Валера сказал/написал: \"{valera_text}\"" if valera_text else "Валера прислал что-то непонятное."
+    user_content = f"Валера высрал: \"{valera_text}\"" if valera_text else "Валера прислал какую-то непонятную хуйню."
 
     try:
         response = groq_client.chat.completions.create(
@@ -190,31 +187,32 @@ async def generate_text_roast(valera_text: str) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ],
-            max_tokens=100,
-            temperature=0.8
+            max_tokens=250,
+            temperature=0.9
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Валера, перечитай сам, что ты выдал..."
+        return reply if reply else "Валера, блять, перечитай сам какую хуйню ты сморозил..."
     except Exception as e:
         logger.error(f"Ошибка текстовой генерации: {e}")
-        return "Валера, твои мысли снова сломали нейросеть."
+        return "Валера, твои тупые мысли даже нейросеть крашнули нахуй."
 
 
-# --- АНАЛИЗ КАРТИНКИ И ПОДКОЛ ЧЕРЕЗ VISION API ---
+# --- ЖЕСТКИЙ ТРОЛЛИНГ КАРТИНОК ---
 async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
     if not groq_client:
-        return "Валера, у меня картинка не загрузилась, но уверен — там ерунда."
+        return "Валера, у меня картинка твоя не прогрузилась, но уверен — там полная параша."
 
     try:
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
         prompt_text = (
-            "Посмотри на это изображение, которое прислал пользователь Валера в чат. "
-            "Коротко и с сарказмом подколи его за то, что нарисовано или изображено на этой картинке. "
-            "Отвечай коротко (1-2 предложения), живым разговорным языком. Без Markdown и звездочек (*)."
+            "Посмотри на это изображение, которое прислал этот клоун Валера. "
+            "Жестко, с матом и едким сарказмом подколи его за то, что там изображено. "
+            "Отвечай коротко (1-2 предложения), разговорным токсичным языком, без звездочек (*) и Markdown. "
+            "Обязательно завершай мысль точкой."
         )
         if caption:
-            prompt_text += f" Подпись к картинке от Валеры: \"{caption}\"."
+            prompt_text += f" Подпись Валеры к картинке: \"{caption}\"."
 
         response = groq_client.chat.completions.create(
             model=VISION_MODEL,
@@ -232,26 +230,26 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
                     ]
                 }
             ],
-            max_tokens=120,
-            temperature=0.8
+            max_tokens=250,
+            temperature=0.9
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Валера, ну и картинку ты нашёл..."
+        return reply if reply else "Валера, ну и кал ты скинул, пиздец просто..."
     except Exception as e:
         logger.error(f"Ошибка Vision API: {e}")
-        return "Валера, даже нейросеть с глазами в шоке от твоей картинки."
+        return "Валера, даже у нейросети глаза кровят от твоей картинки."
 
 
-# --- ЕДИНСТВЕННАЯ КОМАНДА /ping ---
+# --- КОМАНДА /ping ---
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
-            "🤖 **Валера-Бот на связи!**\n\n"
-            f"• Статус ИИ: ✅ Работает\n"
+            "🤖 **Валера-Бот (Токсик-мод) на связи!**\n\n"
+            f"• Статус ИИ: ✅ Готов душить\n"
             f"• Текст: `{TEXT_MODEL}`\n"
             f"• Фото: `{VISION_MODEL}`\n"
             f"• ГС: `{AUDIO_MODEL}`\n"
-            f"• Жертва: @{TARGET_USERNAME}"
+            f"• Жертва: @{TARGET_USERNAME} ({TARGET_ROAST_CHANCE*100}%)"
         )
         await update.message.reply_text(status_msg, parse_mode="Markdown")
 
@@ -316,10 +314,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(valera_phrase)
         return
 
-    # 2. ПЕРСОНАЛЬНЫЙ ШАНС: подколоть Валеру (@soult0ken)
+    # 2. ПЕРСОНАЛЬНЫЙ ШАНС: жестко душить Валеру (@soult0ken)
     if username == TARGET_USERNAME:
         if random.random() < TARGET_ROAST_CHANCE:
-            logger.info(f"🎯 Шанс сработал на Валеру ({TARGET_ROAST_CHANCE*100}%)!")
+            logger.info(f"🎯 Жесткий троллинг сработал на Валеру ({TARGET_ROAST_CHANCE*100}%)!")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
             roast_text = ""
@@ -330,11 +328,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     photo_file = await update.message.photo[-1].get_file()
                     photo_bytes = await photo_file.download_as_bytearray()
                     caption = update.message.caption or ""
-                    logger.info("🖼 Скачиваем картинку Валеры для анализа...")
+                    logger.info("🖼 Скачиваем картинку Валеры для разноса...")
                     roast_text = await generate_image_roast(bytes(photo_bytes), caption)
                 except Exception as e:
                     logger.error(f"Не удалось обработать фото Валеры: {e}")
-                    roast_text = "Валера, твоя картинка не грузится, но мем наверняка баян."
+                    roast_text = "Валера, твоя пикча даже не грузится, такая же бесполезная, как и ты."
 
             # Б) Если Валера прислал голосовое сообщение
             elif update.message.voice:
@@ -342,11 +340,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     voice_file = await update.message.voice.get_file()
                     voice_bytes = await voice_file.download_as_bytearray()
                     valera_text = await transcribe_voice(bytes(voice_bytes))
-                    logger.info(f"🎙 Расшифрованное ГС Валеры: '{valera_text}'")
+                    logger.info(f"🎙 Расшифрованная голосовуха Валеры: '{valera_text}'")
                     roast_text = await generate_text_roast(valera_text)
                 except Exception as e:
                     logger.error(f"Не удалось скачать или расшифровать ГС: {e}")
-                    roast_text = "Валера, у тебя даже голосовухи нормально не записываются."
+                    roast_text = "Валера, ты даже голосовуху нормально записать не в состоянии, лузер."
 
             # В) Если Валера написал обычный текст или прислал подпись
             elif update.message.text or update.message.caption:
@@ -367,13 +365,10 @@ def main():
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
-    # Команда для проверки живой ли бот
     application.add_handler(CommandHandler("ping", ping_command))
-    
-    # Обработчик обычных сообщений
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Бот запущен, слушает чат...")
+    logger.info("🤖 Токсичный Валера-бот запущен и ждет жертву...")
     
     application.run_polling(drop_pending_updates=True)
 
