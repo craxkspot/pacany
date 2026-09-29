@@ -20,7 +20,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
 TARGET_USERNAME = "soult0ken"
-TEXT_MODEL = "gemma2-9b-it"
 AUDIO_MODEL = "whisper-large-v3-turbo"
 
 groq_client = OpenAI(
@@ -28,7 +27,40 @@ groq_client = OpenAI(
     api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
-# Внезапные сообщения от лица Валеры для любых сообщений в чате
+
+# --- АВТОМАТИЧЕСКИЙ ПОДБОР РАБОЧЕЙ ТЕКСТОВОЙ МОДЕЛИ ---
+def get_active_text_model() -> str:
+    if not groq_client:
+        return "llama-3.1-8b-instant"
+    try:
+        models_data = groq_client.models.list().data
+        available_ids = [m.id for m in models_data]
+        
+        # Приоритетный список стабильных моделей
+        priority_models = [
+            "llama-3.1-8b-instant",
+            "llama-3.3-70b-versatile",
+            "llama3-8b-8192",
+            "gemma2-9b-it"
+        ]
+        
+        for model in priority_models:
+            if model in available_ids:
+                return model
+                
+        # Если ничего из списка нет, берем первую текстовую модель
+        text_models = [m_id for m_id in available_ids if "whisper" not in m_id and "vision" not in m_id]
+        if text_models:
+            return text_models[0]
+            
+    except Exception as e:
+        logger.error(f"Не удалось автоопределить модель: {e}")
+    
+    return "llama-3.1-8b-instant"
+
+
+TEXT_MODEL = get_active_text_model()
+
 VALERA_IMPERSONATIONS = [
     "я валера",
     "я валера и я одобряю этот бред",
@@ -41,12 +73,12 @@ VALERA_IMPERSONATIONS = [
 ]
 
 
-# --- ВЕБ-СЕРВЕР ДЛЯ ХЕЛСЧЕКОВ (RENDER / KOYEB) ---
+# --- ВЕБ-СЕРВЕР ДЛЯ ХЕЛСЧЕКОВ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Valera Roast & Voice Bot is running!")
+        self.wfile.write(b"Valera Bot is operational!")
 
     def log_message(self, format, *args):
         return
@@ -58,9 +90,8 @@ def run_web_server():
     server.serve_forever()
 
 
-# --- РАСШИФРОВКА ГОЛОСОВЫХ СООБЩЕНИЙ ЧЕРЕЗ GROQ WHISPER ---
+# --- РАСШИФРОВКА ГС ЧЕРЕЗ WHISPER ---
 async def transcribe_voice(voice_file_bytes: bytes) -> str:
-    """Конвертирует голосовое сообщение Валеры в текст"""
     if not groq_client:
         return ""
     try:
@@ -76,7 +107,7 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- ГЕНЕРАЦИЯ ПОДКОЛА ЧЕРЕЗ GROQ ---
+# --- ГЕНЕРАЦИЯ ПОДКОЛА ---
 async def generate_dynamic_roast(valera_text: str) -> str:
     if not groq_client:
         return "Валера, ну что за бред ты опять выдал..."
@@ -105,13 +136,13 @@ async def generate_dynamic_roast(valera_text: str) -> str:
             temperature=0.8
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
-        return reply if reply else "Валера, перечитай/переслушай сам, что ты выдал..."
+        return reply if reply else "Валера, перечитай сам, что ты выдал..."
     except Exception as e:
         logger.error(f"Ошибка в процессе генерации: {e}")
         return "Валера, твои мысли снова сломали нейросеть."
 
 
-# --- ТЕСТИРОВАНИЕ И ТАБЛИЦА СТАТУСА ПРИ СТАРТЕ ---
+# --- ТАБЛИЦА СТАТУСА ---
 def print_startup_status_table() -> bool:
     tg_ok = "✅ ОК" if TELEGRAM_TOKEN else "❌ ОТСУТСТВУЕТ"
     key_ok = "✅ ОК" if GROQ_API_KEY else "❌ ОТСУТСТВУЕТ"
@@ -142,7 +173,7 @@ def print_startup_status_table() -> bool:
 │ TELEGRAM_TOKEN       │ {tg_ok:<47} │
 │ GROQ_API_KEY         │ {key_ok:<47} │
 │ Жертва (Target)      │ @{TARGET_USERNAME:<46} │
-│ Текстовая модель     │ {TEXT_MODEL:<47} │
+│ Авто-выбранная модель│ {TEXT_MODEL:<47} │
 │ Модель Whisper (ГС)  │ {AUDIO_MODEL:<47} │
 │ Статус ИИ            │ {text_status:<47} │
 │ Тестовый отклик      │ {test_response[:45]:<47} │
@@ -152,7 +183,7 @@ def print_startup_status_table() -> bool:
     return is_working and bool(TELEGRAM_TOKEN)
 
 
-# --- ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ ---
+# --- ОБРАБОТЧИК СООБЩЕНИЙ ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.from_user:
         return
@@ -160,26 +191,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     username = user.username.lower() if user.username else ""
 
-    # 1. ЛОГИКА №1: 5% шанс на ЛЮБОЕ сообщение от ЛЮБОГО пользователя в чате написать "я валера"
+    # 1. 5% шанс написать "я валера" на ЛЮБОЕ сообщение
     if random.random() < 0.05:
         valera_phrase = random.choice(VALERA_IMPERSONATIONS)
         logger.info(f"🎲 5% глобальный шанс сработал! Отправляем: '{valera_phrase}'")
         await update.message.reply_text(valera_phrase)
         return
 
-    # 2. ЛОГИКА №2: 5% шанс на сообщение/ГС именно от Валеры (@soult0ken)
+    # 2. 5% шанс подколоть сообщения/ГС Валеры (@soult0ken)
     if username == TARGET_USERNAME:
         if random.random() < 0.05:
-            logger.info("🎯 5% шанс сработал на сообщение/ГС Валеры!")
+            logger.info("🎯 5% шанс сработал на Валеру!")
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
             valera_text = ""
 
-            # Если Валера написал текстом
             if update.message.text or update.message.caption:
                 valera_text = update.message.text or update.message.caption or ""
 
-            # Если Валера записал голосовое сообщение
             elif update.message.voice:
                 try:
                     voice_file = await update.message.voice.get_file()
@@ -189,10 +218,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.error(f"Не удалось скачать или расшифровать ГС: {e}")
 
-            # Генерация подкола на основе текста или расшифровки ГС
             roast_text = await generate_dynamic_roast(valera_text)
-
-            # Отвечаем реплаем непосредственно на сообщение/ГС Валеры
             await update.message.reply_text(roast_text)
 
 
@@ -202,15 +228,15 @@ def main():
 
     ready = print_startup_status_table()
     if not ready:
-        logger.warning("⚠️ Внимание: Проблемы с токеном или API ключом (см. таблицу выше).")
+        logger.warning("⚠️ Проверьте параметры подключения в таблице выше.")
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
-    # Слушаем все виды сообщений (текст, голосовые, фото и т.д.)
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Бот слушает чат...")
-    application.run_polling()
+    logger.info("🤖 Бот запущен и слушает чат...")
+    
+    # drop_pending_updates=True устраняет 409 Conflict при перезапусках
+    application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
