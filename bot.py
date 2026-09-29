@@ -111,7 +111,6 @@ def get_active_models() -> tuple[str, str]:
         return fallback_text, fallback_vision
 
 
-# Динамически определяем рабочие модели при старте
 TEXT_MODEL, VISION_MODEL = get_active_models()
 
 VALERA_IMPERSONATIONS = [
@@ -163,7 +162,7 @@ async def generate_text_roast(chat_id: int, sender_username: str, user_text: str
 
     is_master = (sender_username == MASTER_USERNAME)
 
-    # Проверяем, нужен ли боту веб-поиск (если в тексте есть вопросы о фактах, событиях, кто/что/где)
+    # Проверяем, нужен ли веб-поиск фактов
     search_keywords = ["кто такой", "что такое", "когда", "где", "найди", "погугли", "курс", "цена", "почему", "сколько"]
     search_data = ""
     if any(kw in user_text.lower() for kw in search_keywords):
@@ -291,7 +290,7 @@ def print_startup_status_table() -> bool:
     return is_working and bool(TELEGRAM_TOKEN)
 
 
-# --- ГЛАВНЫЙ АЛГОРИТМ ПРИНЯТИЯ РЕШЕНИЯ ---
+# --- ГЛАВНЫЙ АЛГОРИТМ ПРИНЯТИЯ РЕШЕНИЯ (РАВНЫЕ ПРАВА У ВСЕХ) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.from_user:
         return
@@ -311,14 +310,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
     is_addressed_to_bot = any(word in text.lower() for word in ["валер", "бот валера", "валера,", "валера!"])
 
-    # Фильтр от ложных срабатываний на реального Валеру в конфы
+    # Фильтр от ложных срабатываний на реального Валеру в конфе
     if "валер" in text.lower() and not is_addressed_to_bot and not is_reply_to_bot and not is_master:
         if random.random() > 0.15:
             logger.info("🤖 Похоже, зовут реального Валеру, бот молчит.")
             return
 
-    # Принимаем решение отвечать / не отвечать
-    should_reply = is_master or is_addressed_to_bot or is_reply_to_bot or (random.random() < 0.40)
+    # У ВСЕХ РАВНЫЕ ПРАВА: отвечает при обращении по имени, ответе на его сообщение или рандому (40%)
+    should_reply = is_addressed_to_bot or is_reply_to_bot or (random.random() < 0.40)
 
     if not should_reply:
         if random.random() < 0.03:
@@ -379,7 +378,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Ультимативный Валера-бот со всеми логами и таблицей запущен...")
+    logger.info("🤖 Ультимативный Валера-бот запущен и полностью готов...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
