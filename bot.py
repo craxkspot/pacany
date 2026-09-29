@@ -24,10 +24,6 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 TARGET_USERNAME = "soult0ken"
 AUDIO_MODEL = "whisper-large-v3-turbo"
 
-# Принудительно ставим быструю и злую модель, которая не бредит философией
-TEXT_MODEL = "llama-3.1-8b-instant" 
-VISION_MODEL = "llama-3.2-11b-vision-preview"
-
 # --- НАСТРОЙКИ ВЕРОЯТНОСТЕЙ ---
 TARGET_ROAST_CHANCE = 0.50  # 50% шанс ответить на сообщение
 GLOBAL_ROAST_CHANCE = 0.05  # 5% шанс написать рандомную фразу Валеры
@@ -36,6 +32,51 @@ groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
+
+
+# --- АВТОМАТИЧЕСКИЙ ПОДБОР РАБОЧИХ МОДЕЛЕЙ (БЕЗ ОШИБОК 404) ---
+def get_active_models() -> tuple[str, str]:
+    fallback_text = "llama-3.3-70b-versatile"
+    fallback_vision = "llama-3.2-11b-vision-preview"
+
+    if not groq_client:
+        return fallback_text, fallback_vision
+
+    try:
+        models_data = groq_client.models.list().data
+        available_ids = [m.id for m in models_data]
+        logger.info(f"Доступные модели на Groq: {available_ids}")
+
+        banned = ["whisper", "vision", "embed", "guard", "audio"]
+        selected_text = None
+        
+        for m in available_ids:
+            if any(b in m.lower() for b in banned):
+                continue
+            if "llama" in m.lower() or "qwen" in m.lower() or "mixtral" in m.lower():
+                selected_text = m
+                break
+        
+        if not selected_text and available_ids:
+            selected_text = available_ids[0]
+
+        selected_vision = None
+        for m in available_ids:
+            if "vision" in m.lower():
+                selected_vision = m
+                break
+        
+        if not selected_vision:
+            selected_vision = fallback_vision
+
+        return selected_text or fallback_text, selected_vision
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка моделей: {e}")
+        return fallback_text, fallback_vision
+
+
+# Динамически определяем рабочие модели при старте
+TEXT_MODEL, VISION_MODEL = get_active_models()
 
 VALERA_IMPERSONATIONS = [
     "я валера",
@@ -83,7 +124,7 @@ async def transcribe_voice(voice_file_bytes: bytes) -> str:
         return ""
 
 
-# --- УЛЬТРА-ЖЕСТКИЙ ТРОЛЛИНГ ТЕКСТА/ГС (БЕЗ ШИЗЫ) ---
+# --- УЛЬТРА-ЖЕСТКИЙ ТРОЛЛИНГ ТЕКСТА/ГС (БЕЗ ШИЗЫ, t=0.2) ---
 async def generate_text_roast(user_text: str) -> str:
     if not groq_client:
         return "Ну что за хуйню ты опять высрал."
@@ -109,7 +150,7 @@ async def generate_text_roast(user_text: str) -> str:
                 {"role": "user", "content": user_content}
             ],
             max_tokens=40,
-            temperature=0.2
+            temperature=0.2  # Низкая температура убирает бред и шизофрению
         )
         reply = response.choices[0].message.content.replace("*", "").strip()
         return reply if reply else "Блять, даже ответить нечего на этот бред."
@@ -163,7 +204,7 @@ async def generate_image_roast(image_bytes: bytes, caption: str = "") -> str:
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         status_msg = (
-            "🤖 **Валера-Бот (Адекватный токсик) на связи!**\n\n"
+            "🤖 **Валера-Бот (Автоподбор моделей) на связи!**\n\n"
             f"• Статус ИИ: ✅ Готов душить\n"
             f"• Текст: `{TEXT_MODEL}`\n"
             f"• Фото/Кружки: `{VISION_MODEL}`\n"
@@ -186,7 +227,7 @@ def print_startup_status_table() -> bool:
         try:
             res = groq_client.chat.completions.create(
                 model=TEXT_MODEL,
-                messages=[{"role": "user", "content": "Напиши ровно один символ: OK"}],
+                messages=[{"role": "user", "content": "OK"}],
                 max_tokens=5,
                 temperature=0.1
             )
@@ -195,10 +236,10 @@ def print_startup_status_table() -> bool:
                 text_status = "✅ РАБОТАЕТ"
                 is_working = True
             else:
-                test_response = "Пустой ответ от модели"
+                test_response = "Пустой ответ"
         except Exception as e:
             text_status = "❌ ОШИБКА API"
-            test_response = str(e)
+            test_response = str(e)[:45]
 
     table_log = f"""
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -206,12 +247,10 @@ def print_startup_status_table() -> bool:
 ├──────────────────────┬─────────────────────────────────────────────────┤
 │ TELEGRAM_TOKEN       │ {tg_ok:<47} │
 │ GROQ_API_KEY         │ {key_ok:<47} │
-│ Режим теста          │ ВСЕ ПОЛЬЗОВАТЕЛИ (ТОКСИК БЕЗ ШИЗЫ)              │
 │ Текстовая модель     │ {TEXT_MODEL:<47} │
-│ Зрячая модель (Фото) │ {VISION_MODEL:<47} │
-│ Модель Whisper (ГС)  │ {AUDIO_MODEL:<47} │
+│ Зрячая модель        │ {VISION_MODEL:<47} │
 │ Статус ИИ            │ {text_status:<47} │
-│ Тестовый отклик      │ {test_response[:45]:<47} │
+│ Отклик модели        │ {test_response:<47} │
 └──────────────────────┴─────────────────────────────────────────────────┘
 """
     logger.info(table_log)
@@ -308,7 +347,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_command))
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
     
-    logger.info("🤖 Адекватный токсик Валера-бот запущен...")
+    logger.info("🤖 Умный Валера-бот запущен...")
     
     application.run_polling(drop_pending_updates=True)
 
