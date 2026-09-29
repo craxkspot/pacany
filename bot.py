@@ -5,11 +5,8 @@ import logging
 import io
 import re
 import base64
-import time
 import urllib.parse
 import httpx
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from openai import OpenAI
@@ -38,27 +35,6 @@ VISION_MODEL = "llama-3.2-11b-vision-preview"
 
 CACHE_FILE = "user_cache.json"
 chat_histories = {}
-last_bot_message_time = {}  # Для отслеживания ответов вдогонку
-
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Pantera Bot is alive!")
-
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
 
 
 # --- ДОЛГОВРЕМЕННАЯ ПАМЯТЬ (JSON) ---
@@ -187,15 +163,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    user_name = get_user_full_name(update.effective_user)
-    user_id_str = str(update.effective_user.id)
-    chat_type = update.message.chat.type
+    
+    # Корректное определение имени автора (поддерживает людей и других ботов)
+    if update.message.from_user:
+        user_name = update.message.from_user.first_name or update.message.from_user.username or "Пользователь"
+        user_id_str = str(update.message.from_user.id)
+    else:
+        user_name = "Мира"
+        user_id_str = "999999999"
 
+    chat_type = update.message.chat.type
     user_text = update.message.text or update.message.caption or ""
     lower_text = user_text.lower()
 
-    # Обновляем таймстамп и проверяем факты через ИИ-фильтр
-    if user_id_str in user_cache["users"]:
+    # Сбор фактов о реальных пользователях
+    if update.message.from_user and user_id_str in user_cache["users"]:
         user_cache["users"][user_id_str]["last_interaction"] = update.message.date.isoformat()
         
         if user_text and len(user_text.split()) > 1:
@@ -206,7 +188,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     save_cache(user_cache)
                     logger.info(f"Записан факт о {user_name}: {verified_fact}")
 
-    # Обработка вложений (Vision) — поддержка фото и прикрепленных медиа
+    # Обработка картинок (Vision)
     base64_image = None
     if update.message.photo:
         try:
@@ -219,7 +201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text and not base64_image:
         return
 
-    # Генерация картинок
+    # Генерация изображений
     if is_image_request(lower_text):
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         
@@ -260,7 +242,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Не получилось сгенерировать, сервер перегружен.")
             return
 
-    # Инициализация оперативной истории
+    # Оперативная история чата
     if chat_id not in chat_histories:
         chat_histories[chat_id] = [
             {
@@ -283,20 +265,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recent_msgs = chat_histories[chat_id][-13:]
         chat_histories[chat_id] = [system_prompt] + recent_msgs
 
-    # Условия активации бота в группе (разрешаем реагировать на реплаи/упоминания даже от других ботов)
+    # Условия активации бота в группе
     is_reply_to_bot = (
         update.message.reply_to_message 
         and update.message.reply_to_message.from_user.id == context.bot.id
     )
     is_mentioned = "пантера" in lower_text or base64_image is not None
-    recent_bot_activity = (chat_id in last_bot_message_time) and (time.time() - last_bot_message_time[chat_id] < 30)
 
-    if chat_type != "private" and not is_reply_to_bot and not is_mentioned and not recent_bot_activity and random.random() < 0.88:
+    if chat_type != "private" and not is_reply_to_bot and not is_mentioned and random.random() < 0.85:
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-    # Сборка долговременной памяти (фактов о пользователе)
+    # Сборка долговременной памяти
     known_users_context = []
     if user_id_str in user_cache["users"]:
         u_data = user_cache["users"][user_id_str]
@@ -305,7 +286,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "real_facts": u_data["facts"]
         })
 
-    # Поиск информации, если нужен
+    # Поиск информации
     search_context = ""
     if not base64_image:
         needs_search_keywords = ["кто", "что", "знаешь", "найди", "загугли", "гугл", "инфа", "расскажи про"]
@@ -360,8 +341,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_text = "Сервер временно недоступен."
 
     try:
-        sent_msg = await update.message.reply_text(reply_text)
-        last_bot_message_time[chat_id] = time.time()
+        await update.message.reply_text(reply_text)
     except Exception as e:
         logger.error(f"Ошибка отправки Telegram: {e}")
 
@@ -371,12 +351,24 @@ def main():
         logger.error("Токены не заданы! Проверь переменные окружения.")
         return
 
-    server_thread = Thread(target=run_web_server, daemon=True)
-    server_thread.start()
-
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_message))
-    application.run_polling()
+
+    port = int(os.environ.get("PORT", 10000))
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+
+    if not render_url:
+        logger.error("Переменная RENDER_EXTERNAL_URL не задана в настройках Render!")
+        return
+
+    logger.info(f"Запуск бота через Webhook на порту {port}...")
+
+    # Запуск через встроенный вебхук (заменяет старый polling и ручной HTTP-сервер)
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        webhook_url=f"{render_url}/{TELEGRAM_TOKEN}"
+    )
 
 
 if __name__ == "__main__":
